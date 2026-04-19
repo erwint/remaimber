@@ -64,12 +64,17 @@ func configureHooks(settings map[string]any) {
 		"type":    "command",
 		"command": "remaimber import >/dev/null 2>&1 &",
 	}
+	remaimberThrottled := map[string]any{
+		"type":    "command",
+		"command": "remaimber import-if-stale >/dev/null 2>&1 &",
+	}
 
 	for _, event := range []struct {
 		name string
 		hook map[string]any
 	}{
 		{"PreCompact", remaimberImport},
+		{"Notification", remaimberThrottled},
 		{"SessionEnd", remaimberImportBg},
 	} {
 		existing, _ := hooks[event.name].([]any)

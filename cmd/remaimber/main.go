@@ -37,6 +37,7 @@ func main() {
 	root.PersistentFlags().StringVar(&dbPath, "db", "", "Database path (default: ~/.claude/remaimber/remaimber.db, or REMAIMBER_DB env)")
 
 	root.AddCommand(importCmd())
+	root.AddCommand(importIfStaleCmd())
 	root.AddCommand(importFileCmd())
 	root.AddCommand(listCmd())
 	root.AddCommand(searchCmd())
@@ -87,6 +88,40 @@ func importCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&force, "force", false, "Force re-import all files from beginning")
 	return cmd
+}
+
+func importIfStaleCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:    "import-if-stale",
+		Short:  "Import only if last import was >5 minutes ago (for hooks)",
+		Hidden: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if !importer.ShouldImport() {
+				return nil
+			}
+			lock := importer.AcquireImportLock()
+			if lock == nil {
+				return nil
+			}
+
+			// Re-check after acquiring lock
+			if !importer.ShouldImport() {
+				importer.TouchAndRelease(lock)
+				return nil
+			}
+
+			database, err := openDB()
+			if err != nil {
+				importer.TouchAndRelease(lock)
+				return err
+			}
+			defer database.Close()
+
+			importer.ImportAll(database, false)
+			importer.TouchAndRelease(lock)
+			return nil
+		},
+	}
 }
 
 func importFileCmd() *cobra.Command {
@@ -165,8 +200,12 @@ func listCmd() *cobra.Command {
 				if title == "" {
 					title = truncate(s.FirstPrompt, 50)
 				}
-				fmt.Printf("%-36s  %-20s  %s  [%d msgs]\n",
-					s.SessionID, importer.PrettyProjectName(s.ProjectKey), title, s.MessageCount)
+				resumable := " "
+				if importer.SessionFileExists(s.ProjectKey, s.SessionID) {
+					resumable = "*"
+				}
+				fmt.Printf("%s %-36s  %-20s  %s  [%d msgs]\n",
+					resumable, s.SessionID, importer.PrettyProjectName(s.ProjectKey), title, s.MessageCount)
 			}
 			if len(sessions) == 0 {
 				fmt.Println("No sessions found. Run 'remaimber import' first.")
@@ -221,8 +260,12 @@ func searchCmd() *cobra.Command {
 				if title == "" {
 					title = importer.PrettyProjectName(r.ProjectKey)
 				}
-				fmt.Printf("[%s] %s (%s/%s)\n  %s\n\n",
-					r.Timestamp, title, r.Type, r.Role, r.Snippet)
+				resumable := " "
+				if importer.SessionFileExists(r.ProjectKey, r.SessionID) {
+					resumable = "*"
+				}
+				fmt.Printf("%s %s [%s] %s (%s)\n  %s\n\n",
+					resumable, r.SessionID[:8], r.Timestamp, title, r.Role, r.Snippet)
 			}
 			if len(results) == 0 {
 				fmt.Println("No results found.")

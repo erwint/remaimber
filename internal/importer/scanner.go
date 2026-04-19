@@ -64,6 +64,17 @@ func ProjectPathFromKey(key string) string {
 	return "/" + strings.ReplaceAll(key[1:], "-", "/")
 }
 
+// SessionFileExists checks if a session's JSONL file still exists on disk.
+func SessionFileExists(projectKey, sessionID string) bool {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	path := filepath.Join(home, ".claude", "projects", projectKey, sessionID+".jsonl")
+	_, err = os.Stat(path)
+	return err == nil
+}
+
 // PrettyProjectName formats a project key for display.
 // Extracts the last 2 path components: "-Volumes-Data-src-owner-repo" -> "owner/repo"
 // Falls back to full key if too short.
