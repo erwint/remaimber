@@ -110,12 +110,13 @@ func ListSessions(db *sql.DB, f ListFilter) ([]types.Session, error) {
 
 // SearchFilter holds filtering options for search queries.
 type SearchFilter struct {
-	Query   string
-	Project string
-	Role    string // filter by message role (user, assistant)
-	Since   string
-	Until   string
-	Limit   int
+	Query          string
+	Project        string
+	Role           string // filter by message role (user, assistant)
+	Since          string
+	Until          string
+	Limit          int
+	ExcludeSession string // exclude this session ID from results
 }
 
 // SearchMessages performs FTS5 search and returns results with session context.
@@ -129,6 +130,10 @@ func SearchMessages(db *sql.DB, f SearchFilter) ([]types.SearchResult, error) {
 		JOIN sessions s ON s.session_id = m.session_id
 		WHERE messages_fts MATCH ?`
 	args := []any{f.Query}
+	if f.ExcludeSession != "" {
+		q += ` AND m.session_id != ?`
+		args = append(args, f.ExcludeSession)
+	}
 	if f.Project != "" {
 		q += ` AND s.project_key LIKE ?`
 		args = append(args, "%"+f.Project+"%")

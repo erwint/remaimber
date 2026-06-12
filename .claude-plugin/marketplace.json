@@ -1,0 +1,14 @@
+{
+  "name": "remaimber",
+  "description": "Archive and search Claude Code conversations with SQLite FTS5",
+  "owner": {
+    "name": "erwin"
+  },
+  "plugins": [
+    {
+      "name": "rmb",
+      "description": "Search and recall archived Claude Code conversations",
+      "source": "./"
+    }
+  ]
+}
