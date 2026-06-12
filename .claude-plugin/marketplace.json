@@ -2,13 +2,17 @@
   "name": "remaimber",
   "description": "Archive and search Claude Code conversations with SQLite FTS5",
   "owner": {
-    "name": "erwin"
+    "name": "erwint",
+    "url": "https://github.com/erwint"
   },
   "plugins": [
     {
       "name": "rmb",
       "description": "Search and recall archived Claude Code conversations",
-      "source": "./"
+      "source": "./",
+      "homepage": "https://github.com/erwint/remaimber",
+      "category": "productivity",
+      "tags": ["search", "conversations", "archive"]
     }
   ]
 }
