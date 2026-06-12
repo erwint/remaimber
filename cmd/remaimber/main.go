@@ -222,7 +222,7 @@ func listCmd() *cobra.Command {
 }
 
 func searchCmd() *cobra.Command {
-	var project, role, since, until string
+	var project, role, since, until, excludeSession string
 	var limit int
 	var jsonOut bool
 	cmd := &cobra.Command{
@@ -238,12 +238,13 @@ func searchCmd() *cobra.Command {
 			defer database.Close()
 
 			results, err := db.SearchMessages(database, db.SearchFilter{
-				Query:   query,
-				Project: project,
-				Role:    role,
-				Since:   since,
-				Until:   until,
-				Limit:   limit,
+				Query:          query,
+				Project:        project,
+				Role:           role,
+				Since:          since,
+				Until:          until,
+				Limit:          limit,
+				ExcludeSession: excludeSession,
 			})
 			if err != nil {
 				return err
@@ -279,6 +280,7 @@ func searchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&until, "until", "", "Filter messages before this date (ISO 8601)")
 	cmd.Flags().IntVar(&limit, "limit", 20, "Max results")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output as JSON")
+	cmd.Flags().StringVar(&excludeSession, "exclude-session", "", "Exclude this session ID from results")
 	return cmd
 }
 
@@ -608,16 +610,18 @@ func runMCP() error {
 		mcp.WithString("since", mcp.Description("Filter messages after this date (ISO 8601)")),
 		mcp.WithString("until", mcp.Description("Filter messages before this date (ISO 8601)")),
 		mcp.WithNumber("limit", mcp.Description("Max results (default 10)")),
+		mcp.WithString("exclude_session", mcp.Description("Exclude this session ID from results")),
 	)
 	s.AddTool(searchTool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		query, _ := req.RequireString("query")
 		f := db.SearchFilter{
-			Query:   query,
-			Project: req.GetString("project", ""),
-			Role:    req.GetString("role", ""),
-			Since:   req.GetString("since", ""),
-			Until:   req.GetString("until", ""),
-			Limit:   req.GetInt("limit", 10),
+			Query:          query,
+			Project:        req.GetString("project", ""),
+			Role:           req.GetString("role", ""),
+			Since:          req.GetString("since", ""),
+			Until:          req.GetString("until", ""),
+			Limit:          req.GetInt("limit", 10),
+			ExcludeSession: req.GetString("exclude_session", ""),
 		}
 
 		importer.ImportAll(database, false)
