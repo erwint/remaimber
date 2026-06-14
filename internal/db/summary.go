@@ -2,9 +2,32 @@ package db
 
 import (
 	"database/sql"
+	"regexp"
+	"strings"
 
 	"github.com/erwin/remaimber/internal/types"
 )
+
+// toolMarkerLine matches a lone tool-call marker the parser emits for a
+// tool_use block, e.g. "[tool: Bash]".
+var toolMarkerLine = regexp.MustCompile(`^\[tool: [^\]]*\]$`)
+
+// isToolOnly reports whether an assistant message's text is nothing but tool-call
+// markers (no prose) — pure agent mechanics with no recall value.
+func isToolOnly(text string) bool {
+	sawMarker := false
+	for _, ln := range strings.Split(strings.TrimSpace(text), "\n") {
+		ln = strings.TrimSpace(ln)
+		if ln == "" {
+			continue
+		}
+		if !toolMarkerLine.MatchString(ln) {
+			return false
+		}
+		sawMarker = true
+	}
+	return sawMarker
+}
 
 // SummaryWork describes a session that needs (re)summarizing and how far the
 // existing rolling summary has already consumed its user/assistant messages.
@@ -93,6 +116,12 @@ func UserAssistantMessages(db *sql.DB, sessionID string) ([]types.Message, error
 		var m types.Message
 		if err := rows.Scan(&m.Role, &m.Type, &m.ContentText); err != nil {
 			return nil, err
+		}
+		// Drop assistant turns that are only tool-call markers (no prose). The
+		// text is already loaded and short, so this is cheap; doing it in Go
+		// avoids brittle SQL pattern matching.
+		if m.Type == "assistant" && isToolOnly(m.ContentText) {
+			continue
 		}
 		msgs = append(msgs, m)
 	}

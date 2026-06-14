@@ -20,20 +20,45 @@ func TestUserAssistantMessagesFiltersToolNoise(t *testing.T) {
 	// assistant prose — kept
 	InsertMessage(tx, &types.Message{SessionID: "s", UUID: "a1", Type: "assistant", Role: "assistant",
 		ContentText: "Added the --repo flag and wired it through.", ContentJSON: `{"type":"assistant"}`})
-	// empty-text turn (e.g. tool-call only) — excluded
+	// empty-text turn — excluded
 	InsertMessage(tx, &types.Message{SessionID: "s", UUID: "a2", Type: "assistant", Role: "assistant",
 		ContentText: "", ContentJSON: `{"type":"assistant"}`})
+	// tool-only assistant turn (just markers, no prose) — excluded
+	InsertMessage(tx, &types.Message{SessionID: "s", UUID: "a3", Type: "assistant", Role: "assistant",
+		ContentText: "[tool: Bash]\n[tool: Read]", ContentJSON: `{"type":"assistant"}`})
+	// assistant prose that also calls a tool — kept (has real text)
+	InsertMessage(tx, &types.Message{SessionID: "s", UUID: "a4", Type: "assistant", Role: "assistant",
+		ContentText: "Let me check the tests.\n[tool: Bash]", ContentJSON: `{"type":"assistant"}`})
 	tx.Commit()
 
 	msgs, err := UserAssistantMessages(database, "s")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(msgs) != 2 {
-		t.Fatalf("want 2 salient messages (real user + assistant prose), got %d: %+v", len(msgs), msgs)
+	if len(msgs) != 3 {
+		t.Fatalf("want 3 salient messages, got %d: %+v", len(msgs), msgs)
 	}
-	if msgs[0].ContentText != "please add a --repo flag" || msgs[1].ContentText != "Added the --repo flag and wired it through." {
-		t.Errorf("unexpected salient set / order: %+v", msgs)
+	got := []string{msgs[0].ContentText, msgs[1].ContentText, msgs[2].ContentText}
+	want := []string{"please add a --repo flag", "Added the --repo flag and wired it through.", "Let me check the tests.\n[tool: Bash]"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("salient[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestIsToolOnly(t *testing.T) {
+	toolOnly := []string{"[tool: Bash]", "  [tool: Edit]  ", "[tool: Read]\n[tool: Read]"}
+	for _, s := range toolOnly {
+		if !isToolOnly(s) {
+			t.Errorf("isToolOnly(%q) = false, want true", s)
+		}
+	}
+	hasProse := []string{"Let me look.\n[tool: Bash]", "done", "[tool: Bash] then I edited the file", ""}
+	for _, s := range hasProse {
+		if isToolOnly(s) {
+			t.Errorf("isToolOnly(%q) = true, want false", s)
+		}
 	}
 }
 
