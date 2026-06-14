@@ -6,6 +6,37 @@ import (
 	"github.com/erwin/remaimber/internal/types"
 )
 
+func TestUserAssistantMessagesFiltersToolNoise(t *testing.T) {
+	database := testDB(t)
+	insertSession(t, database, &types.Session{SessionID: "s", ProjectKey: "-p"})
+
+	tx, _ := database.Begin()
+	// real user prompt — kept
+	InsertMessage(tx, &types.Message{SessionID: "s", UUID: "u1", Type: "user", Role: "user",
+		ContentText: "please add a --repo flag", ContentJSON: `{"type":"user","message":{"content":"add flag"}}`})
+	// tool_result carried on a user-role turn — noise, excluded
+	InsertMessage(tx, &types.Message{SessionID: "s", UUID: "u2", Type: "user", Role: "user",
+		ContentText: "total 8\n-rw-r--r-- main.go", ContentJSON: `{"type":"user","message":{"content":[{"type":"tool_result","content":"total 8"}]}}`})
+	// assistant prose — kept
+	InsertMessage(tx, &types.Message{SessionID: "s", UUID: "a1", Type: "assistant", Role: "assistant",
+		ContentText: "Added the --repo flag and wired it through.", ContentJSON: `{"type":"assistant"}`})
+	// empty-text turn (e.g. tool-call only) — excluded
+	InsertMessage(tx, &types.Message{SessionID: "s", UUID: "a2", Type: "assistant", Role: "assistant",
+		ContentText: "", ContentJSON: `{"type":"assistant"}`})
+	tx.Commit()
+
+	msgs, err := UserAssistantMessages(database, "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("want 2 salient messages (real user + assistant prose), got %d: %+v", len(msgs), msgs)
+	}
+	if msgs[0].ContentText != "please add a --repo flag" || msgs[1].ContentText != "Added the --repo flag and wired it through." {
+		t.Errorf("unexpected salient set / order: %+v", msgs)
+	}
+}
+
 func TestSessionsNeedingSummary(t *testing.T) {
 	database := testDB(t)
 	insertSession(t, database, &types.Session{SessionID: "s1", ProjectKey: "-p", EndedAt: "2026-01-01"})
