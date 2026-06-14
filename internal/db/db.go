@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -70,7 +71,32 @@ CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
 	INSERT INTO messages_fts(messages_fts, rowid, content_text) VALUES('delete', old.id, old.content_text);
 	INSERT INTO messages_fts(rowid, content_text) VALUES (new.id, new.content_text);
 END;
+
+-- Durable cross-worktree identity, keyed by session_id and decoupled from the
+-- sessions table so it can be captured (at SessionStart) before the session is
+-- imported. No FK on purpose: the identity may exist before the session row.
+CREATE TABLE IF NOT EXISTS session_identity (
+	session_id    TEXT PRIMARY KEY,
+	repo_id       TEXT,
+	subpath       TEXT,
+	worktree_root TEXT,
+	cwd           TEXT,
+	captured_at   TEXT,
+	pid           INTEGER,
+	ended_at      TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_identity_repo    ON session_identity(repo_id);
+CREATE INDEX IF NOT EXISTS idx_identity_subpath ON session_identity(repo_id, subpath);
 `
+
+// migrations are idempotent ALTER statements applied after the schema. SQLite
+// has no "ADD COLUMN IF NOT EXISTS", so a duplicate-column error is expected and
+// ignored on databases that already have the column.
+var migrations = []string{
+	`ALTER TABLE sessions ADD COLUMN summary TEXT`,
+	`ALTER TABLE sessions ADD COLUMN summary_offset INTEGER DEFAULT 0`,
+}
 
 // DBPath returns the default database path.
 func DBPath() (string, error) {
@@ -130,6 +156,14 @@ func OpenAt(path string) (*sql.DB, error) {
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("schema: %w", err)
+	}
+
+	// Apply idempotent column migrations; ignore "duplicate column" errors.
+	for _, m := range migrations {
+		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			db.Close()
+			return nil, fmt.Errorf("migration %q: %w", m, err)
+		}
 	}
 
 	return db, nil

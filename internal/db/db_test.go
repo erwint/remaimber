@@ -101,18 +101,18 @@ func TestUpsertSession(t *testing.T) {
 	db := testDB(t)
 	tx, _ := db.Begin()
 	sess := &types.Session{
-		SessionID:  "test-session-1",
-		ProjectKey: "-test-project",
-		ProjectPath: "/test/project",
-		CustomTitle: "Test Title",
-		FirstPrompt: "Hello world",
-		GitBranch:  "main",
-		CWD:        "/test",
-		StartedAt:  "2026-01-01T00:00:00Z",
-		EndedAt:    "2026-01-01T01:00:00Z",
-		MessageCount: 5,
-		FileMtime:  1234567890.0,
-		FileSize:   1024,
+		SessionID:      "test-session-1",
+		ProjectKey:     "-test-project",
+		ProjectPath:    "/test/project",
+		CustomTitle:    "Test Title",
+		FirstPrompt:    "Hello world",
+		GitBranch:      "main",
+		CWD:            "/test",
+		StartedAt:      "2026-01-01T00:00:00Z",
+		EndedAt:        "2026-01-01T01:00:00Z",
+		MessageCount:   5,
+		FileMtime:      1234567890.0,
+		FileSize:       1024,
 		LastByteOffset: 512,
 	}
 	if err := UpsertSession(tx, sess); err != nil {

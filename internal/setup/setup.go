@@ -60,22 +60,36 @@ func configureHooks(settings map[string]any) {
 		"type":    "command",
 		"command": "remaimber import >/dev/null 2>&1",
 	}
-	remaimberImportBg := map[string]any{
+	// Throttled background maintenance: import new messages, then summarize stale
+	// sessions. Runs on recurring events so work still happens even if SessionEnd
+	// never fires (e.g. a VM killed overnight). Both steps are individually
+	// throttled and self-skipping, so this is cheap to fire often.
+	remaimberMaintain := map[string]any{
 		"type":    "command",
-		"command": "remaimber import >/dev/null 2>&1 &",
+		"command": "{ remaimber import-if-stale; remaimber summarize-if-stale; } >/dev/null 2>&1 &",
 	}
-	remaimberThrottled := map[string]any{
+	// SessionStart: capture durable identity (foreground, fast, reads stdin),
+	// then run a maintenance sweep that catches up anything left unsummarized by
+	// a previous session that ended uncleanly.
+	remaimberSessionStart := map[string]any{
 		"type":    "command",
-		"command": "remaimber import-if-stale >/dev/null 2>&1 &",
+		"command": "remaimber record-identity >/dev/null 2>&1; { remaimber import-if-stale; remaimber summarize-if-stale; } >/dev/null 2>&1 &",
+	}
+	// On session end (best-effort; not guaranteed to fire): clear the liveness
+	// marker, then import and summarize in the background.
+	remaimberSessionEnd := map[string]any{
+		"type":    "command",
+		"command": "remaimber mark-ended >/dev/null 2>&1; { remaimber import; remaimber summarize-if-stale; } >/dev/null 2>&1 &",
 	}
 
 	for _, event := range []struct {
 		name string
 		hook map[string]any
 	}{
+		{"SessionStart", remaimberSessionStart},
 		{"PreCompact", remaimberImport},
-		{"Notification", remaimberThrottled},
-		{"SessionEnd", remaimberImportBg},
+		{"Notification", remaimberMaintain},
+		{"SessionEnd", remaimberSessionEnd},
 	} {
 		existing, _ := hooks[event.name].([]any)
 		replaced := false

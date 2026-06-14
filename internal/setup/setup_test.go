@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -114,11 +115,31 @@ func TestRun_PreservesExistingSettings(t *testing.T) {
 		t.Error("statusLine not preserved")
 	}
 
-	// SessionStart hook preserved
+	// SessionStart: the user's existing hook is preserved, and remaimber adds
+	// its own record-identity hook alongside it.
 	hooks := settings["hooks"].(map[string]any)
 	ss := hooks["SessionStart"].([]any)
-	if len(ss) != 1 {
-		t.Error("SessionStart hook not preserved")
+	if len(ss) != 2 {
+		t.Fatalf("SessionStart should have user hook + remaimber hook, got %d", len(ss))
+	}
+	var foundUser, foundRemaimber bool
+	for _, entry := range ss {
+		hookList := entry.(map[string]any)["hooks"].([]any)
+		for _, h := range hookList {
+			cmd, _ := h.(map[string]any)["command"].(string)
+			if cmd == "my-start-hook" {
+				foundUser = true
+			}
+			if strings.Contains(cmd, "record-identity") {
+				foundRemaimber = true
+			}
+		}
+	}
+	if !foundUser {
+		t.Error("user's SessionStart hook not preserved")
+	}
+	if !foundRemaimber {
+		t.Error("remaimber record-identity SessionStart hook not added")
 	}
 }
 
