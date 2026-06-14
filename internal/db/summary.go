@@ -70,9 +70,18 @@ func UserAssistantMessages(db *sql.DB, sessionID string) ([]types.Message, error
 	// Select only what summarization needs (role/type/text) — crucially NOT
 	// content_json — and cap text length in SQL so a giant session can't blow up
 	// memory.
+	//
+	// Exclude tool-result turns: in Claude Code's JSONL these come back as
+	// user-role messages carrying file reads / command output, which is the bulk
+	// of a long agentic session and pure noise for recall. The content_json LIKE
+	// is evaluated inside SQLite, so the heavy column is never loaded into this
+	// process. Empty-text messages (e.g. tool-call-only turns) are skipped too,
+	// since they only waste fold-window slots.
 	rows, err := db.Query(`SELECT COALESCE(role,''), type, substr(COALESCE(content_text,''), 1, ?)
 		FROM messages
 		WHERE session_id = ? AND role IN ('user','assistant')
+		  AND COALESCE(content_text,'') != ''
+		  AND NOT (type = 'user' AND content_json LIKE '%"tool_result"%')
 		ORDER BY id`, summaryTextCap, sessionID)
 	if err != nil {
 		return nil, err
