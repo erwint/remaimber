@@ -18,6 +18,29 @@ type Session struct {
 	FileSize       int64   `json:"-"`
 	LastByteOffset int64   `json:"-"`
 	ImportedAt     string  `json:"imported_at,omitempty"`
+
+	// Rolling summary (Phase 5).
+	Summary       string `json:"summary,omitempty"`
+	SummaryOffset int    `json:"-"`
+
+	// Durable cross-worktree identity, populated via LEFT JOIN session_identity.
+	RepoID       string `json:"repo_id,omitempty"`
+	Subpath      string `json:"subpath,omitempty"`
+	WorktreeRoot string `json:"worktree_root,omitempty"`
+	IdentityCWD  string `json:"identity_cwd,omitempty"`
+}
+
+// SessionIdentity is the durable, worktree-independent identity of a session,
+// captured at session start so it survives deletion of the worktree.
+type SessionIdentity struct {
+	SessionID    string `json:"session_id"`
+	RepoID       string `json:"repo_id,omitempty"`
+	Subpath      string `json:"subpath,omitempty"`
+	WorktreeRoot string `json:"worktree_root,omitempty"`
+	CWD          string `json:"cwd,omitempty"`
+	CapturedAt   string `json:"captured_at,omitempty"`
+	PID          int    `json:"pid,omitempty"`
+	EndedAt      string `json:"ended_at,omitempty"`
 }
 
 // Message represents a single JSONL line stored in the database.
@@ -43,6 +66,9 @@ type SearchResult struct {
 	Timestamp   string `json:"timestamp,omitempty"`
 	Type        string `json:"type"`
 	Role        string `json:"role,omitempty"`
+	Summary     string `json:"summary,omitempty"`
+	RepoID      string `json:"repo_id,omitempty"`
+	CWD         string `json:"cwd,omitempty"`
 }
 
 // JSONLLine represents a raw parsed JSONL line from a conversation file.

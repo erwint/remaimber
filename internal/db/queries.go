@@ -61,30 +61,57 @@ func GetSessionMeta(db *sql.DB, sessionID string) (mtime float64, size int64, of
 // ListFilter holds filtering options for list and search queries.
 type ListFilter struct {
 	Project string
+	Repo    string // exact match on session_identity.repo_id (cross-worktree)
+	Subpath string // exact match on session_identity.subpath
 	Since   string // ISO timestamp
 	Until   string // ISO timestamp
 	Limit   int
 }
 
+// sessionColumns is the shared SELECT list for loading a full Session, including
+// the LEFT JOINed durable identity. Callers must alias sessions as s and
+// session_identity as si.
+const sessionColumns = `s.session_id, s.project_key, s.project_path, COALESCE(s.custom_title,''),
+	COALESCE(s.first_prompt,''), COALESCE(s.git_branch,''), COALESCE(s.cwd,''),
+	COALESCE(s.started_at,''), COALESCE(s.ended_at,''), s.message_count, COALESCE(s.summary,''),
+	COALESCE(s.summary_offset,0),
+	COALESCE(si.repo_id,''), COALESCE(si.subpath,''), COALESCE(si.worktree_root,''), COALESCE(si.cwd,'')`
+
+// scanSession scans a row produced by sessionColumns.
+func scanSession(scan func(...any) error) (types.Session, error) {
+	var s types.Session
+	err := scan(&s.SessionID, &s.ProjectKey, &s.ProjectPath, &s.CustomTitle, &s.FirstPrompt,
+		&s.GitBranch, &s.CWD, &s.StartedAt, &s.EndedAt, &s.MessageCount, &s.Summary,
+		&s.SummaryOffset, &s.RepoID, &s.Subpath, &s.WorktreeRoot, &s.IdentityCWD)
+	return s, err
+}
+
 // ListSessions returns sessions matching the filter.
 func ListSessions(db *sql.DB, f ListFilter) ([]types.Session, error) {
-	query := `SELECT session_id, project_key, project_path, COALESCE(custom_title,''), COALESCE(first_prompt,''),
-		COALESCE(git_branch,''), COALESCE(cwd,''), COALESCE(started_at,''), COALESCE(ended_at,''), message_count
-		FROM sessions WHERE 1=1`
+	query := `SELECT ` + sessionColumns + `
+		FROM sessions s LEFT JOIN session_identity si USING(session_id) WHERE 1=1`
 	var args []any
 	if f.Project != "" {
-		query += ` AND project_key LIKE ?`
+		query += ` AND s.project_key LIKE ?`
 		args = append(args, "%"+f.Project+"%")
 	}
+	if f.Repo != "" {
+		query += ` AND si.repo_id = ?`
+		args = append(args, f.Repo)
+	}
+	if f.Subpath != "" {
+		query += ` AND si.subpath = ?`
+		args = append(args, f.Subpath)
+	}
 	if f.Since != "" {
-		query += ` AND ended_at >= ?`
+		query += ` AND s.ended_at >= ?`
 		args = append(args, f.Since)
 	}
 	if f.Until != "" {
-		query += ` AND started_at <= ?`
+		query += ` AND s.started_at <= ?`
 		args = append(args, f.Until)
 	}
-	query += ` ORDER BY ended_at DESC LIMIT ?`
+	query += ` ORDER BY s.ended_at DESC LIMIT ?`
 	if f.Limit <= 0 {
 		f.Limit = 20
 	}
@@ -98,9 +125,8 @@ func ListSessions(db *sql.DB, f ListFilter) ([]types.Session, error) {
 
 	var sessions []types.Session
 	for rows.Next() {
-		var s types.Session
-		if err := rows.Scan(&s.SessionID, &s.ProjectKey, &s.ProjectPath, &s.CustomTitle, &s.FirstPrompt,
-			&s.GitBranch, &s.CWD, &s.StartedAt, &s.EndedAt, &s.MessageCount); err != nil {
+		s, err := scanSession(rows.Scan)
+		if err != nil {
 			return nil, err
 		}
 		sessions = append(sessions, s)
@@ -112,6 +138,8 @@ func ListSessions(db *sql.DB, f ListFilter) ([]types.Session, error) {
 type SearchFilter struct {
 	Query          string
 	Project        string
+	Repo           string // exact match on session_identity.repo_id (cross-worktree)
+	Subpath        string // exact match on session_identity.subpath
 	Role           string // filter by message role (user, assistant)
 	Since          string
 	Until          string
@@ -124,10 +152,12 @@ func SearchMessages(db *sql.DB, f SearchFilter) ([]types.SearchResult, error) {
 	q := `
 		SELECT m.session_id, s.project_key, COALESCE(s.custom_title,''),
 			snippet(messages_fts, 0, '>>>', '<<<', '...', 40),
-			COALESCE(m.timestamp,''), m.type, COALESCE(m.role,'')
+			COALESCE(m.timestamp,''), m.type, COALESCE(m.role,''),
+			COALESCE(s.summary,''), COALESCE(si.repo_id,''), COALESCE(si.cwd, s.cwd, '')
 		FROM messages_fts
 		JOIN messages m ON m.id = messages_fts.rowid
 		JOIN sessions s ON s.session_id = m.session_id
+		LEFT JOIN session_identity si ON si.session_id = m.session_id
 		WHERE messages_fts MATCH ?`
 	args := []any{f.Query}
 	if f.ExcludeSession != "" {
@@ -137,6 +167,14 @@ func SearchMessages(db *sql.DB, f SearchFilter) ([]types.SearchResult, error) {
 	if f.Project != "" {
 		q += ` AND s.project_key LIKE ?`
 		args = append(args, "%"+f.Project+"%")
+	}
+	if f.Repo != "" {
+		q += ` AND si.repo_id = ?`
+		args = append(args, f.Repo)
+	}
+	if f.Subpath != "" {
+		q += ` AND si.subpath = ?`
+		args = append(args, f.Subpath)
 	}
 	if f.Role != "" {
 		q += ` AND m.role = ?`
@@ -166,12 +204,40 @@ func SearchMessages(db *sql.DB, f SearchFilter) ([]types.SearchResult, error) {
 	for rows.Next() {
 		var r types.SearchResult
 		if err := rows.Scan(&r.SessionID, &r.ProjectKey, &r.CustomTitle,
-			&r.Snippet, &r.Timestamp, &r.Type, &r.Role); err != nil {
+			&r.Snippet, &r.Timestamp, &r.Type, &r.Role,
+			&r.Summary, &r.RepoID, &r.CWD); err != nil {
 			return nil, err
 		}
 		results = append(results, r)
 	}
 	return results, rows.Err()
+}
+
+// SearchSessionsBySummary finds sessions whose rolling summary matches a
+// substring query. This complements FTS (which searches raw message text) with
+// intent-level matching. Results are ordered most-recent first.
+func SearchSessionsBySummary(db *sql.DB, query string, limit int) ([]types.Session, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := db.Query(`SELECT `+sessionColumns+`
+		FROM sessions s LEFT JOIN session_identity si USING(session_id)
+		WHERE s.summary IS NOT NULL AND s.summary LIKE ?
+		ORDER BY s.ended_at DESC LIMIT ?`, "%"+query+"%", limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var sessions []types.Session
+	for rows.Next() {
+		s, err := scanSession(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		sessions = append(sessions, s)
+	}
+	return sessions, rows.Err()
 }
 
 // GetSessionMessages returns messages for a session, optionally filtered by type.
@@ -268,13 +334,13 @@ func DeleteSession(db *sql.DB, sessionID string) error {
 
 // VerifyResult holds the results of a database integrity check.
 type VerifyResult struct {
-	SessionCount    int
-	MessageCount    int
-	FTSCount        int
-	FTSMatch        bool
-	DuplicateUUIDs  int
-	MessagesByRole  map[string]int
-	TopProjects     []ProjectStat
+	SessionCount   int
+	MessageCount   int
+	FTSCount       int
+	FTSMatch       bool
+	DuplicateUUIDs int
+	MessagesByRole map[string]int
+	TopProjects    []ProjectStat
 }
 
 // ProjectStat holds a project's message count.
@@ -360,12 +426,9 @@ func GetMessageCount(db *sql.DB, sessionID string) (int, error) {
 
 // GetNthLastSession returns the Nth most recent session (1-indexed).
 func GetNthLastSession(db *sql.DB, n int) (*types.Session, error) {
-	var s types.Session
-	err := db.QueryRow(`SELECT session_id, project_key, project_path, COALESCE(custom_title,''), COALESCE(first_prompt,''),
-		COALESCE(git_branch,''), COALESCE(cwd,''), COALESCE(started_at,''), COALESCE(ended_at,''), message_count
-		FROM sessions ORDER BY ended_at DESC LIMIT 1 OFFSET ?`, n-1).
-		Scan(&s.SessionID, &s.ProjectKey, &s.ProjectPath, &s.CustomTitle, &s.FirstPrompt,
-			&s.GitBranch, &s.CWD, &s.StartedAt, &s.EndedAt, &s.MessageCount)
+	s, err := scanSession(db.QueryRow(`SELECT `+sessionColumns+`
+		FROM sessions s LEFT JOIN session_identity si USING(session_id)
+		ORDER BY s.ended_at DESC LIMIT 1 OFFSET ?`, n-1).Scan)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("no session at position %d", n)
 	}
@@ -377,12 +440,9 @@ func GetNthLastSession(db *sql.DB, n int) (*types.Session, error) {
 
 // GetSession returns a single session by ID.
 func GetSession(db *sql.DB, sessionID string) (*types.Session, error) {
-	var s types.Session
-	err := db.QueryRow(`SELECT session_id, project_key, project_path, COALESCE(custom_title,''), COALESCE(first_prompt,''),
-		COALESCE(git_branch,''), COALESCE(cwd,''), COALESCE(started_at,''), COALESCE(ended_at,''), message_count
-		FROM sessions WHERE session_id = ?`, sessionID).
-		Scan(&s.SessionID, &s.ProjectKey, &s.ProjectPath, &s.CustomTitle, &s.FirstPrompt,
-			&s.GitBranch, &s.CWD, &s.StartedAt, &s.EndedAt, &s.MessageCount)
+	s, err := scanSession(db.QueryRow(`SELECT `+sessionColumns+`
+		FROM sessions s LEFT JOIN session_identity si USING(session_id)
+		WHERE s.session_id = ?`, sessionID).Scan)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("session %s not found", sessionID)
 	}

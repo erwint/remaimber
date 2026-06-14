@@ -33,11 +33,11 @@ func ParseLine(sessionID string, line []byte) (*types.Message, error) {
 	jl.RawJSON = line
 
 	m := &types.Message{
-		SessionID:  sessionID,
-		UUID:       jl.UUID,
-		ParentUUID: jl.ParentUUID,
-		Type:       jl.Type,
-		Timestamp:  jl.Timestamp,
+		SessionID:   sessionID,
+		UUID:        jl.UUID,
+		ParentUUID:  jl.ParentUUID,
+		Type:        jl.Type,
+		Timestamp:   jl.Timestamp,
 		ContentJSON: string(line),
 	}
 

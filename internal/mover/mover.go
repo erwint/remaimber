@@ -1,12 +1,148 @@
 package mover
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
+
+// ProjectKeyFromCWD derives Claude Code's project-key encoding for a working
+// directory: path separators and dots become dashes. This is the forward
+// (lossless-enough) encoding — the inverse is lossy and must not be relied on.
+//
+//	"/Volumes/Data/src/foo" -> "-Volumes-Data-src-foo"
+func ProjectKeyFromCWD(cwd string) string {
+	var b strings.Builder
+	for _, r := range cwd {
+		if r == '/' || r == '.' {
+			b.WriteRune('-')
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// CarrierKeyForCWD returns the project key under which Claude stores sessions
+// launched from cwd (the "carrier"). It prefers an existing project directory
+// (authoritative, created by Claude for the live session), then falls back to
+// scanning for a dir whose sessions ran in cwd, then to the forward encoding.
+func CarrierKeyForCWD(cwd string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	projectsDir := filepath.Join(home, ".claude", "projects")
+	encoded := ProjectKeyFromCWD(cwd)
+
+	if _, err := os.Stat(filepath.Join(projectsDir, encoded)); err == nil {
+		return encoded, nil
+	}
+	if key := findKeyByCWD(projectsDir, cwd); key != "" {
+		return key, nil
+	}
+	return encoded, nil
+}
+
+// findKeyByCWD scans project dirs for one whose first session file records the
+// given cwd. Best-effort: reads only the first line of one JSONL per dir.
+func findKeyByCWD(projectsDir, cwd string) string {
+	entries, err := os.ReadDir(projectsDir)
+	if err != nil {
+		return ""
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		matches, _ := filepath.Glob(filepath.Join(projectsDir, entry.Name(), "*.jsonl"))
+		for _, f := range matches {
+			if firstLineCWD(f) == cwd {
+				return entry.Name()
+			}
+			break // only check the first file per dir
+		}
+	}
+	return ""
+}
+
+func firstLineCWD(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	if sc.Scan() {
+		var line struct {
+			CWD string `json:"cwd"`
+		}
+		if json.Unmarshal(sc.Bytes(), &line) == nil {
+			return line.CWD
+		}
+	}
+	return ""
+}
+
+// SetIndexSummary best-effort updates the `summary` field of a session's entry
+// in Claude Code's native sessions-index.json, preserving every other field and
+// the file's structure. No-op if the file, the entries array, or the entry is
+// absent. This is what surfaces remaimber summaries in Claude's resume dialog.
+func SetIndexSummary(projectKey, sessionID, summary string) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(home, ".claude", "projects", projectKey, "sessions-index.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var idx map[string]any
+	if json.Unmarshal(data, &idx) != nil {
+		return nil // not Claude's format; leave untouched
+	}
+	entries, ok := idx["entries"].([]any)
+	if !ok {
+		return nil
+	}
+	changed := false
+	for _, e := range entries {
+		em, ok := e.(map[string]any)
+		if !ok {
+			continue
+		}
+		if em["sessionId"] == sessionID {
+			em["summary"] = summary
+			changed = true
+			break
+		}
+	}
+	if !changed {
+		return nil
+	}
+	out, err := json.MarshalIndent(idx, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, out, 0644)
+}
+
+// LinkIntoProject copies a session's JSONL into targetProject so Claude Code can
+// resume it from that project's cwd (the carrier). Idempotent: if the session is
+// already present in the target, it is treated as success.
+func LinkIntoProject(sessionID, targetProject string) error {
+	err := Move(sessionID, targetProject, true)
+	if err != nil && strings.Contains(err.Error(), "already exists") {
+		return nil
+	}
+	return err
+}
 
 // Move moves or copies a conversation JSONL file to a different project.
 func Move(sessionID, targetProject string, copyOnly bool) error {
