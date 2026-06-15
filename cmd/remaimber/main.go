@@ -17,6 +17,7 @@ import (
 	"github.com/erwin/remaimber/internal/gitinfo"
 	"github.com/erwin/remaimber/internal/importer"
 	"github.com/erwin/remaimber/internal/mover"
+	"github.com/erwin/remaimber/internal/segmenter"
 	"github.com/erwin/remaimber/internal/setup"
 	"github.com/erwin/remaimber/internal/summarizer"
 	"github.com/erwin/remaimber/internal/types"
@@ -844,7 +845,7 @@ func summarizeCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				summary, newID, err := reconcileSegments(cmd.Context(), cfg, database, sessionID, sess.FirstPrompt)
+				summary, newID, err := segmenter.Reconcile(cmd.Context(), cfg, database, sessionID, sess.FirstPrompt, segmentCap())
 				if err != nil {
 					return err
 				}
@@ -939,154 +940,6 @@ func segmentCap() int {
 	return db.DefaultSegmentCap
 }
 
-// reconcileSegments brings a session's segment summaries up to date and returns
-// the session-level summary (segments concatenated) plus the message-id
-// high-water mark. A session is split at every compaction and at the size cap;
-// all but the last segment are frozen and never recomputed — only the open
-// segment is amended with new messages. Phase 1 assumes an append-only (linear)
-// conversation; rewind handling is Phase 2.
-func reconcileSegments(ctx context.Context, cfg summarizer.Config, database *sql.DB, sessionID, goal string) (string, int64, error) {
-	newID, err := db.MaxUAMessageID(database, sessionID)
-	if err != nil {
-		return "", 0, err
-	}
-	content, err := db.SegmentContent(database, sessionID, 0)
-	if err != nil {
-		return "", 0, err
-	}
-	boundaries, err := db.CompactionBoundaries(database, sessionID)
-	if err != nil {
-		return "", 0, err
-	}
-
-	// Phase 2 — rewind handling. Restrict to the active conversation path
-	// (compaction-bridged ancestors of the head). A rewind/restore — to any point,
-	// including before a compaction — drops the abandoned branch here, so the plan
-	// diverges and reconcile re-summarizes from there; off-path frozen segments no
-	// longer match and are recomputed. A compaction alone keeps all its content.
-	onPath, err := db.ActivePathSet(database, sessionID)
-	if err != nil {
-		return "", 0, err
-	}
-	if onPath != nil {
-		kept := content[:0:0]
-		for _, m := range content {
-			if onPath[m.UUID] {
-				kept = append(kept, m)
-			}
-		}
-		content = kept
-	}
-	var compactions []int64
-	for _, b := range boundaries {
-		if onPath == nil || onPath[b.UUID] {
-			compactions = append(compactions, b.ID)
-		}
-	}
-
-	plan := db.PlanSegments(content, compactions, segmentCap())
-	stored, err := db.GetSegments(database, sessionID)
-	if err != nil {
-		return "", 0, err
-	}
-
-	var segs []db.Segment
-	ci := 0 // index into content
-	for i, span := range plan {
-		// Collect this span's content messages [StartID..EndID].
-		var spanMsgs []types.Message
-		for ci < len(content) && content[ci].ID <= span.EndID {
-			if content[ci].ID >= span.StartID {
-				spanMsgs = append(spanMsgs, content[ci])
-			}
-			ci++
-		}
-
-		// Unchanged segment (same boundaries, same closed state, already summarized) — keep as-is.
-		if i < len(stored) && stored[i].StartUUID == span.StartUUID && stored[i].EndUUID == span.EndUUID &&
-			stored[i].Closed == span.Closed && stored[i].Summary != "" {
-			segs = append(segs, stored[i])
-			continue
-		}
-
-		// (Re)summarize. If the open segment merely grew, amend from its high-water
-		// mark; otherwise fold the span from scratch.
-		prev, fromHW := "", int64(0)
-		if i < len(stored) && stored[i].StartUUID == span.StartUUID && !stored[i].Closed {
-			prev, fromHW = stored[i].Summary, stored[i].HighWater
-		}
-		summary, err := foldSegment(ctx, cfg, prev, spanMsgs, fromHW)
-		if err != nil {
-			return "", 0, err
-		}
-		seg := db.Segment{
-			SessionID: sessionID, Seq: i,
-			StartID: span.StartID, EndID: span.EndID,
-			StartUUID: span.StartUUID, EndUUID: span.EndUUID,
-			Summary: summary, MsgCount: span.Count, HighWater: span.EndID,
-			Closed: span.Closed, Reason: span.Reason,
-		}
-		if err := db.UpsertSegment(database, &seg); err != nil {
-			return "", 0, err
-		}
-		segs = append(segs, seg)
-	}
-	// Drop any stale trailing segments (shouldn't happen under append-only).
-	if len(plan) < len(stored) {
-		if err := db.DeleteSegmentsFrom(database, sessionID, len(plan)); err != nil {
-			return "", 0, err
-		}
-	}
-
-	// Roll up the per-segment summaries into one skimmable session summary. The
-	// segments are already distilled, so this is a cheap reduce. A single-segment
-	// session needs no roll-up — its segment summary is the session summary.
-	var parts []string
-	for _, s := range segs {
-		if strings.TrimSpace(s.Summary) != "" {
-			parts = append(parts, strings.TrimSpace(s.Summary))
-		}
-	}
-	switch len(parts) {
-	case 0:
-		return "", newID, nil
-	case 1:
-		return summarizer.StripEphemeral(parts[0]), newID, nil
-	default:
-		rolled, err := cfg.ReduceSummaries(ctx, goal, "", parts)
-		if err != nil {
-			return "", 0, err
-		}
-		return summarizer.StripEphemeral(rolled), newID, nil
-	}
-}
-
-// foldSegment folds a span's content with id > fromHW into prev (windowed),
-// returning the updated, ephemeral-stripped segment summary.
-func foldSegment(ctx context.Context, cfg summarizer.Config, prev string, spanMsgs []types.Message, fromHW int64) (string, error) {
-	var toFold []types.Message
-	for _, m := range spanMsgs {
-		if m.ID > fromHW {
-			toFold = append(toFold, m)
-		}
-	}
-	window := cfg.WindowSize()
-	for i := 0; i < len(toFold); i += window {
-		end := i + window
-		if end > len(toFold) {
-			end = len(toFold)
-		}
-		updated, err := cfg.Amend(ctx, prev, toFold[i:end])
-		if err != nil {
-			return "", err
-		}
-		if updated != "" {
-			prev = updated
-		}
-	}
-	return summarizer.StripEphemeral(prev), nil
-}
-
 // summarizeBlockedInSession reports whether summarization must be skipped because
 // the `claude` backend cannot run nested inside a live Claude session/hook.
 func summarizeBlockedInSession(cfg summarizer.Config) bool {
@@ -1105,7 +958,7 @@ func runBatchSummarize(ctx context.Context, cfg summarizer.Config, database *sql
 		return 0, err
 	}
 	for _, w := range work {
-		summary, newID, err := reconcileSegments(ctx, cfg, database, w.SessionID, w.FirstPrompt)
+		summary, newID, err := segmenter.Reconcile(ctx, cfg, database, w.SessionID, w.FirstPrompt, segmentCap())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "summarize %s: %v\n", shortID(w.SessionID), err)
 			continue
