@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -54,6 +55,7 @@ func main() {
 	root.AddCommand(moveCmd())
 	root.AddCommand(resumeCmd())
 	root.AddCommand(summarizeCmd())
+	root.AddCommand(summaryCmd())
 	root.AddCommand(summarizeIfStaleCmd())
 	root.AddCommand(statsCmd())
 	root.AddCommand(verifyCmd())
@@ -842,7 +844,7 @@ func summarizeCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				summary, newID, err := buildSummary(cmd.Context(), cfg, database, sessionID, sess.FirstPrompt)
+				summary, newID, err := reconcileSegments(cmd.Context(), cfg, database, sessionID, sess.FirstPrompt)
 				if err != nil {
 					return err
 				}
@@ -866,70 +868,197 @@ func summarizeCmd() *cobra.Command {
 	return cmd
 }
 
-// buildSummary builds a session's summary map-reduce: each window of salient
-// messages is summarized independently (map), then the window summaries are
-// consolidated into one, anchored on goal (the opening prompt). It rebuilds from
-// the whole session each time — avoiding the recency bias of an incremental fold
-// — and returns the summary plus the message-id high-water mark it now reflects.
-// An empty session yields an empty summary, but the high-water mark still
-// advances so the session settles.
-func buildSummary(ctx context.Context, cfg summarizer.Config, database *sql.DB, sessionID, goal string) (string, int64, error) {
+// summaryCmd shows a session's roll-up summary and its per-segment summaries.
+func summaryCmd() *cobra.Command {
+	var jsonOut bool
+	cmd := &cobra.Command{
+		Use:   "summary <session-id>",
+		Short: "Show a session's summary and its segments",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			database, err := openDB()
+			if err != nil {
+				return err
+			}
+			defer database.Close()
+
+			sessionID, err := db.ResolveSessionID(database, args[0])
+			if err != nil {
+				return err
+			}
+			sess, err := db.GetSession(database, sessionID)
+			if err != nil {
+				return err
+			}
+			segs, err := db.GetSegments(database, sessionID)
+			if err != nil {
+				return err
+			}
+
+			if jsonOut {
+				out := struct {
+					SessionID string       `json:"session_id"`
+					Summary   string       `json:"summary"`
+					Segments  []db.Segment `json:"segments"`
+				}{sessionID, sess.Summary, segs}
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				return enc.Encode(out)
+			}
+
+			if sess.Summary == "" {
+				fmt.Printf("No summary for %s yet. Run 'remaimber summarize %s'.\n", shortID(sessionID), shortID(sessionID))
+				return nil
+			}
+			fmt.Printf("%s\n", sess.Summary)
+			if len(segs) > 0 {
+				fmt.Printf("\nSegments (%d):\n", len(segs))
+				for _, s := range segs {
+					state := "open"
+					if s.Closed {
+						state = s.Reason
+					}
+					line := strings.ReplaceAll(s.Summary, "\n", " ")
+					fmt.Printf("  [%d] %-10s %3d msgs  %s\n", s.Seq, state, s.MsgCount, truncate(line, 96))
+				}
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output as JSON")
+	return cmd
+}
+
+// segmentCap returns the soft-split size, overridable via REMAIMBER_SEGMENT_CAP.
+func segmentCap() int {
+	if s := os.Getenv("REMAIMBER_SEGMENT_CAP"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			return n
+		}
+	}
+	return db.DefaultSegmentCap
+}
+
+// reconcileSegments brings a session's segment summaries up to date and returns
+// the session-level summary (segments concatenated) plus the message-id
+// high-water mark. A session is split at every compaction and at the size cap;
+// all but the last segment are frozen and never recomputed — only the open
+// segment is amended with new messages. Phase 1 assumes an append-only (linear)
+// conversation; rewind handling is Phase 2.
+func reconcileSegments(ctx context.Context, cfg summarizer.Config, database *sql.DB, sessionID, goal string) (string, int64, error) {
 	newID, err := db.MaxUAMessageID(database, sessionID)
 	if err != nil {
 		return "", 0, err
 	}
-
-	// Compaction handling: if the session was context-compacted, Claude's
-	// compaction summary already distills everything before it. Depending on the
-	// mode, anchor on it (and map only post-compaction messages), summarize only
-	// post-compaction, or ignore it and map the whole session.
-	fromID, prior := int64(0), ""
-	if cfg.CompactMode != "full" {
-		if text, compactID, ok := db.LatestCompactSummary(database, sessionID); ok {
-			fromID = compactID
-			if cfg.CompactMode == "anchor" {
-				prior = text
-			}
-		}
+	content, err := db.SegmentContent(database, sessionID, 0)
+	if err != nil {
+		return "", 0, err
 	}
-
-	msgs, err := db.UserAssistantMessagesAfter(database, sessionID, fromID)
+	compactions, err := db.CompactionIDs(database, sessionID)
+	if err != nil {
+		return "", 0, err
+	}
+	plan := db.PlanSegments(content, compactions, segmentCap())
+	stored, err := db.GetSegments(database, sessionID)
 	if err != nil {
 		return "", 0, err
 	}
 
-	// Map: an independent summary per window.
-	window := cfg.WindowSize()
-	var partials []string
-	for i := 0; i < len(msgs); i += window {
-		end := i + window
-		if end > len(msgs) {
-			end = len(msgs)
+	var segs []db.Segment
+	ci := 0 // index into content
+	for i, span := range plan {
+		// Collect this span's content messages [StartID..EndID].
+		var spanMsgs []types.Message
+		for ci < len(content) && content[ci].ID <= span.EndID {
+			if content[ci].ID >= span.StartID {
+				spanMsgs = append(spanMsgs, content[ci])
+			}
+			ci++
 		}
-		p, err := cfg.MapWindow(ctx, msgs[i:end])
+
+		// Unchanged segment (same boundaries, same closed state, already summarized) — keep as-is.
+		if i < len(stored) && stored[i].StartUUID == span.StartUUID && stored[i].EndUUID == span.EndUUID &&
+			stored[i].Closed == span.Closed && stored[i].Summary != "" {
+			segs = append(segs, stored[i])
+			continue
+		}
+
+		// (Re)summarize. If the open segment merely grew, amend from its high-water
+		// mark; otherwise fold the span from scratch.
+		prev, fromHW := "", int64(0)
+		if i < len(stored) && stored[i].StartUUID == span.StartUUID && !stored[i].Closed {
+			prev, fromHW = stored[i].Summary, stored[i].HighWater
+		}
+		summary, err := foldSegment(ctx, cfg, prev, spanMsgs, fromHW)
 		if err != nil {
 			return "", 0, err
 		}
-		if strings.TrimSpace(p) != "" {
-			partials = append(partials, p)
+		seg := db.Segment{
+			SessionID: sessionID, Seq: i,
+			StartID: span.StartID, EndID: span.EndID,
+			StartUUID: span.StartUUID, EndUUID: span.EndUUID,
+			Summary: summary, MsgCount: span.Count, HighWater: span.EndID,
+			Closed: span.Closed, Reason: span.Reason,
+		}
+		if err := db.UpsertSegment(database, &seg); err != nil {
+			return "", 0, err
+		}
+		segs = append(segs, seg)
+	}
+	// Drop any stale trailing segments (shouldn't happen under append-only).
+	if len(plan) < len(stored) {
+		if err := db.DeleteSegmentsFrom(database, sessionID, len(plan)); err != nil {
+			return "", 0, err
 		}
 	}
 
-	// Reduce: consolidate. With no prior and a single window, the partial is the
-	// summary; otherwise consolidate (prior, if any, anchors the earlier portion).
-	var summary string
-	switch {
-	case prior == "" && len(partials) == 0:
+	// Roll up the per-segment summaries into one skimmable session summary. The
+	// segments are already distilled, so this is a cheap reduce. A single-segment
+	// session needs no roll-up — its segment summary is the session summary.
+	var parts []string
+	for _, s := range segs {
+		if strings.TrimSpace(s.Summary) != "" {
+			parts = append(parts, strings.TrimSpace(s.Summary))
+		}
+	}
+	switch len(parts) {
+	case 0:
 		return "", newID, nil
-	case prior == "" && len(partials) == 1:
-		summary = partials[0]
+	case 1:
+		return summarizer.StripEphemeral(parts[0]), newID, nil
 	default:
-		summary, err = cfg.ReduceSummaries(ctx, goal, prior, partials)
+		rolled, err := cfg.ReduceSummaries(ctx, goal, "", parts)
 		if err != nil {
 			return "", 0, err
 		}
+		return summarizer.StripEphemeral(rolled), newID, nil
 	}
-	return summarizer.StripEphemeral(summary), newID, nil
+}
+
+// foldSegment folds a span's content with id > fromHW into prev (windowed),
+// returning the updated, ephemeral-stripped segment summary.
+func foldSegment(ctx context.Context, cfg summarizer.Config, prev string, spanMsgs []types.Message, fromHW int64) (string, error) {
+	var toFold []types.Message
+	for _, m := range spanMsgs {
+		if m.ID > fromHW {
+			toFold = append(toFold, m)
+		}
+	}
+	window := cfg.WindowSize()
+	for i := 0; i < len(toFold); i += window {
+		end := i + window
+		if end > len(toFold) {
+			end = len(toFold)
+		}
+		updated, err := cfg.Amend(ctx, prev, toFold[i:end])
+		if err != nil {
+			return "", err
+		}
+		if updated != "" {
+			prev = updated
+		}
+	}
+	return summarizer.StripEphemeral(prev), nil
 }
 
 // summarizeBlockedInSession reports whether summarization must be skipped because
@@ -950,7 +1079,7 @@ func runBatchSummarize(ctx context.Context, cfg summarizer.Config, database *sql
 		return 0, err
 	}
 	for _, w := range work {
-		summary, newID, err := buildSummary(ctx, cfg, database, w.SessionID, w.FirstPrompt)
+		summary, newID, err := reconcileSegments(ctx, cfg, database, w.SessionID, w.FirstPrompt)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "summarize %s: %v\n", shortID(w.SessionID), err)
 			continue
@@ -1203,6 +1332,34 @@ func runMCP() error {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 		data, _ := json.MarshalIndent(messages, "", "  ")
+		return mcp.NewToolResultText(string(data)), nil
+	})
+
+	// get_summary
+	getSummaryTool := mcp.NewTool("get_summary",
+		mcp.WithDescription("Get a session's recall summary and its per-segment summaries (cheaper than reading the full session)"),
+		mcp.WithString("session_id", mcp.Required(), mcp.Description("Session UUID or prefix")),
+	)
+	s.AddTool(getSummaryTool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		prefix, _ := req.RequireString("session_id")
+		sessionID, err := db.ResolveSessionID(database, prefix)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		sess, err := db.GetSession(database, sessionID)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		segs, err := db.GetSegments(database, sessionID)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		out := struct {
+			SessionID string       `json:"session_id"`
+			Summary   string       `json:"summary"`
+			Segments  []db.Segment `json:"segments"`
+		}{sessionID, sess.Summary, segs}
+		data, _ := json.MarshalIndent(out, "", "  ")
 		return mcp.NewToolResultText(string(data)), nil
 	})
 
