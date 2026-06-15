@@ -104,23 +104,30 @@ func (c Config) IsHTTP() bool {
 // recency bias of folding, where late windows dominate and early work is lost.
 
 const mapSystemPrompt = `Summarize this excerpt of a coding session in 1-2 plain sentences: ` +
-	`what was being worked on, the concrete actions and decisions, and any specific files, ` +
-	`functions, commands, flags, libraries, or errors named. ` +
+	`what was being worked on, the concrete actions and decisions, and especially any user-facing commands, ` +
+	`features, or workflows introduced. Name specific commands, flags, files, functions, libraries, or errors. ` +
+	`Describe the work directly — never name an actor (no "the user", "the developer", "the assistant"). ` +
 	`Omit incidental identifiers (commit hashes, internal task or run IDs, temp paths) and transient status. ` +
-	`Neutral third person, no preamble, no markdown. Output only the summary.`
+	`No preamble, no markdown. Output only the summary.`
 
 const reduceSystemPrompt = `You are consolidating partial summaries of a single Claude Code coding session ` +
 	`into ONE recall-optimized summary that lets someone later find and resume this exact session.
 
 You are given the session's opening goal and its partial summaries in chronological order. ` +
-	`Produce one cohesive summary of the WHOLE session: state the overall goal/topic, then the major things ` +
-	`built, changed, decided, or debugged across ALL parts — give early and late work equal weight, do not ` +
-	`over-emphasize the end, and do not drop earlier phases — then the final state and anything left to do. ` +
-	`Name concrete files, features, commands, and technologies.
+	`Produce one cohesive summary of the WHOLE session, giving early and late phases EQUAL weight — do not ` +
+	`over-emphasize the end, and do not drop earlier phases.
 
-Omit incidental artifacts: commit hashes, internal task/run/batch IDs, temp paths, and transient status ` +
-	`like "currently processing". Use neutral third person (no "the user"), 2-5 sentences, no preamble, ` +
-	`no markdown, no bullet points. Output only the summary text.`
+Prioritize, in this order:
+1. User-facing outcomes — the commands, features, and workflows delivered, and what someone can now DO. ` +
+	`Name them concretely (slash commands, CLI subcommands, the actual user workflow).
+2. Key decisions and the core concepts or identifiers involved.
+3. Notable implementation details — mention briefly; do NOT lead with or dwell on bare file names.
+Then give the final state and anything left to do.
+
+Describe the work directly — never name an actor (no "the user", "the developer", "the assistant", "the AI"). ` +
+	`Omit incidental artifacts: commit hashes, internal task/run/batch IDs, temp paths, and transient status ` +
+	`like "currently processing". 2-5 sentences, no preamble, no markdown, no bullet points. ` +
+	`Output only the summary text.`
 
 // MapWindow summarizes a single window of messages independently (the map step).
 func (c Config) MapWindow(ctx context.Context, window []types.Message) (string, error) {
