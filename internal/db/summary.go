@@ -94,6 +94,20 @@ func MaxUAMessageID(db *sql.DB, sessionID string) (int64, error) {
 	return id, err
 }
 
+// LatestCompactSummary returns the text and message id of a session's most recent
+// compaction summary — the digest Claude Code writes when it compacts context.
+// Since compaction summarizes the whole conversation up to that point, the latest
+// one supersedes earlier ones. Returns ok=false if the session was never compacted.
+func LatestCompactSummary(db *sql.DB, sessionID string) (text string, id int64, ok bool) {
+	err := db.QueryRow(`SELECT id, COALESCE(content_text,'') FROM messages
+		WHERE session_id = ? AND content_json LIKE '%"isCompactSummary":true%'
+		ORDER BY id DESC LIMIT 1`, sessionID).Scan(&id, &text)
+	if err != nil || text == "" {
+		return "", 0, false
+	}
+	return text, id, true
+}
+
 // summaryTextCap bounds how much of each message's text is loaded for
 // summarization. Summaries don't need full message bodies, and loading the raw
 // content_json of a large session can spike memory into the gigabytes (enough to
