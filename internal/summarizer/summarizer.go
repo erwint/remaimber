@@ -110,24 +110,55 @@ const mapSystemPrompt = `Summarize this excerpt of a coding session in 1-2 plain
 	`Omit incidental identifiers (commit hashes, internal task or run IDs, temp paths) and transient status. ` +
 	`No preamble, no markdown. Output only the summary.`
 
-const reduceSystemPrompt = `You are consolidating partial summaries of a single Claude Code coding session ` +
-	`into ONE recall-optimized summary that lets someone later find and resume this exact session.
+// reduceSentenceRange scales the final summary length to the session's scope:
+// a long, multi-feature session must not be crushed into the same 2-3 sentences
+// as a short one, or headline features get dropped no matter how they're ranked.
+// Bounded at the top so the summary stays skimmable rather than approaching the
+// original transcript.
+func reduceSentenceRange(numPartials int) (lo, hi int) {
+	switch {
+	case numPartials <= 4:
+		return 2, 3
+	case numPartials <= 10:
+		return 3, 5
+	case numPartials <= 20:
+		return 5, 8
+	default:
+		return 8, 12
+	}
+}
 
-You are given the session's opening goal and its partial summaries in chronological order. ` +
-	`Produce one cohesive summary of the WHOLE session, giving early and late phases EQUAL weight — do not ` +
-	`over-emphasize the end, and do not drop earlier phases.
+// reducePrompt is the final-consolidation prompt with a scope-scaled length.
+func reducePrompt(loSentences, hiSentences int) string {
+	return fmt.Sprintf(`You are consolidating partial summaries of a single Claude Code coding session `+
+		`into ONE recall-optimized summary that lets someone later find and resume this exact session.
+
+You are given the session's opening goal and its partial summaries in chronological order. `+
+		`Produce one cohesive summary of the WHOLE session, giving early and late phases EQUAL weight — do not `+
+		`over-emphasize the end, and do not drop earlier phases. Cover every distinct feature or workflow; `+
+		`a longer session warrants a longer summary.
 
 Prioritize, in this order:
-1. User-facing outcomes — the commands, features, and workflows delivered, and what someone can now DO. ` +
-	`Name them concretely (slash commands, CLI subcommands, the actual user workflow).
+1. User-facing outcomes — the commands, features, and workflows delivered, and what someone can now DO. `+
+		`Name them concretely (slash commands, CLI subcommands, the actual user workflow).
 2. Key decisions and the core concepts or identifiers involved.
 3. Notable implementation details — mention briefly; do NOT lead with or dwell on bare file names.
 Then give the final state and anything left to do.
 
-Describe the work directly — never name an actor (no "the user", "the developer", "the assistant", "the AI"). ` +
-	`Omit incidental artifacts: commit hashes, internal task/run/batch IDs, temp paths, and transient status ` +
-	`like "currently processing". 2-5 sentences, no preamble, no markdown, no bullet points. ` +
-	`Output only the summary text.`
+Describe the work directly — never name an actor (no "the user", "the developer", "the assistant", "the AI"). `+
+		`Omit incidental artifacts: commit hashes, internal task/run/batch IDs, temp paths, and transient status `+
+		`like "currently processing". Write %d-%d sentences as flowing prose, no preamble, no markdown, `+
+		`no bullet points. Output only the summary text.`, loSentences, hiSentences)
+}
+
+// mergeSystemPrompt is used for intermediate batches when a session has too many
+// partials for one reduce call. It preserves detail (no tight length cap) so the
+// final reduce still has every distinct point to work from.
+const mergeSystemPrompt = `Merge these partial summaries of a coding session into one thorough intermediate ` +
+	`summary that preserves every distinct feature, command, decision, file, and technology mentioned. ` +
+	`This will be consolidated again later, so favor completeness over brevity; do not compress aggressively. ` +
+	`Describe the work directly — never name an actor. Omit incidental identifiers (commit hashes, internal ` +
+	`task/run IDs, temp paths). No preamble, no markdown. Output only the summary.`
 
 // MapWindow summarizes a single window of messages independently (the map step).
 func (c Config) MapWindow(ctx context.Context, window []types.Message) (string, error) {
@@ -140,13 +171,22 @@ func (c Config) MapWindow(ctx context.Context, window []types.Message) (string, 
 const maxReduceInputs = 40
 
 // ReduceSummaries consolidates chronological partial summaries into one final
-// summary anchored on goal. Empty input yields an empty summary.
+// summary anchored on goal, with length scaled to the session's scope. Empty
+// input yields an empty summary.
 func (c Config) ReduceSummaries(ctx context.Context, goal string, partials []string) (string, error) {
+	lo, hi := reduceSentenceRange(len(partials))
+	return c.reduceWithTarget(ctx, goal, partials, lo, hi)
+}
+
+// reduceWithTarget keeps the original (scope-based) length target across the
+// hierarchical merge, so a huge session's final summary is sized to the whole
+// session — not to the small set of intermediate merges feeding the last pass.
+func (c Config) reduceWithTarget(ctx context.Context, goal string, partials []string, lo, hi int) (string, error) {
 	switch {
 	case len(partials) == 0:
 		return "", nil
 	case len(partials) <= maxReduceInputs:
-		return c.complete(ctx, reduceSystemPrompt, renderReduce(goal, partials))
+		return c.complete(ctx, reducePrompt(lo, hi), renderReduce(goal, partials))
 	}
 	var mids []string
 	for i := 0; i < len(partials); i += maxReduceInputs {
@@ -154,13 +194,13 @@ func (c Config) ReduceSummaries(ctx context.Context, goal string, partials []str
 		if end > len(partials) {
 			end = len(partials)
 		}
-		m, err := c.complete(ctx, reduceSystemPrompt, renderReduce(goal, partials[i:end]))
+		m, err := c.complete(ctx, mergeSystemPrompt, renderReduce(goal, partials[i:end]))
 		if err != nil {
 			return "", err
 		}
 		mids = append(mids, m)
 	}
-	return c.ReduceSummaries(ctx, goal, mids)
+	return c.reduceWithTarget(ctx, goal, mids, lo, hi)
 }
 
 func renderWindow(window []types.Message) string {

@@ -138,6 +138,29 @@ func TestMapWindowHTTP(t *testing.T) {
 	}
 }
 
+func TestReduceSentenceRangeScales(t *testing.T) {
+	// Longer sessions get a larger budget; bounded at the top.
+	lo4, hi4 := reduceSentenceRange(4)
+	lo16, hi16 := reduceSentenceRange(16)
+	_, hi100 := reduceSentenceRange(100)
+	if !(hi4 < hi16 && hi16 <= hi100) {
+		t.Errorf("budget should grow with scope: hi4=%d hi16=%d hi100=%d", hi4, hi16, hi100)
+	}
+	if lo4 < 1 || hi100 > 20 {
+		t.Errorf("range out of sane bounds: %d..%d", lo4, hi100)
+	}
+	if lo16 > hi16 {
+		t.Errorf("lo must not exceed hi: %d..%d", lo16, hi16)
+	}
+}
+
+func TestReducePromptIncludesRange(t *testing.T) {
+	p := reducePrompt(5, 8)
+	if !strings.Contains(p, "5-8 sentences") {
+		t.Errorf("reduce prompt missing scaled range:\n%s", p)
+	}
+}
+
 func TestReduceSummariesBatches(t *testing.T) {
 	var calls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
