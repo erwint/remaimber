@@ -954,32 +954,34 @@ func reconcileSegments(ctx context.Context, cfg summarizer.Config, database *sql
 	if err != nil {
 		return "", 0, err
 	}
-	compactions, err := db.CompactionIDs(database, sessionID)
+	boundaries, err := db.CompactionBoundaries(database, sessionID)
 	if err != nil {
 		return "", 0, err
 	}
 
-	// Phase 2 — rewind handling, confined to the live span. A rewind can only
-	// touch the post-last-compaction span (frozen history can't be rewound into).
-	// ActivePathSet covers exactly that span (the parent chain resets at
-	// compaction), so drop abandoned-branch messages there while keeping all
-	// pre-compaction content unconditionally.
+	// Phase 2 — rewind handling. Restrict to the active conversation path
+	// (compaction-bridged ancestors of the head). A rewind/restore — to any point,
+	// including before a compaction — drops the abandoned branch here, so the plan
+	// diverges and reconcile re-summarizes from there; off-path frozen segments no
+	// longer match and are recomputed. A compaction alone keeps all its content.
 	onPath, err := db.ActivePathSet(database, sessionID)
 	if err != nil {
 		return "", 0, err
 	}
 	if onPath != nil {
-		var lastComp int64
-		if len(compactions) > 0 {
-			lastComp = compactions[len(compactions)-1]
-		}
 		kept := content[:0:0]
 		for _, m := range content {
-			if m.ID <= lastComp || onPath[m.UUID] {
+			if onPath[m.UUID] {
 				kept = append(kept, m)
 			}
 		}
 		content = kept
+	}
+	var compactions []int64
+	for _, b := range boundaries {
+		if onPath == nil || onPath[b.UUID] {
+			compactions = append(compactions, b.ID)
+		}
 	}
 
 	plan := db.PlanSegments(content, compactions, segmentCap())
