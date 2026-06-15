@@ -41,6 +41,13 @@ type Config struct {
 	APIKey  string        // optional bearer token for the HTTP backend
 	Timeout time.Duration // per-call timeout
 	Window  int           // user/assistant messages folded per call
+
+	// CompactMode controls how a session that was context-compacted is handled:
+	//   "anchor" (default) — use the compaction summary as the earlier-portion
+	//                        anchor and map-reduce only post-compaction messages
+	//   "post"             — summarize only post-compaction messages
+	//   "full"             — ignore compaction; map-reduce the whole session
+	CompactMode string
 }
 
 // LoadConfig reads configuration from the environment:
@@ -73,6 +80,10 @@ func LoadConfig() Config {
 		if n, err := strconv.Atoi(s); err == nil && n > 0 {
 			c.Window = n
 		}
+	}
+	c.CompactMode = os.Getenv("REMAIMBER_COMPACT_MODE")
+	if c.CompactMode == "" {
+		c.CompactMode = "anchor"
 	}
 	return c
 }
@@ -135,7 +146,10 @@ func reducePrompt(loSentences, hiSentences int) string {
 	return fmt.Sprintf(`You are consolidating partial summaries of a single Claude Code coding session `+
 		`into ONE recall-optimized summary that lets someone later find and resume this exact session.
 
-You are given the session's opening goal and its partial summaries in chronological order. `+
+You are given the session's opening goal, optionally a summary of the earlier portion (from an automatic `+
+		`context compaction), and partial summaries of the rest in chronological order. `+
+		`If an earlier-portion summary is present, treat it as authoritative for everything before the partials `+
+		`and fold its substance in as the early phases. `+
 		`Produce one cohesive summary of the WHOLE session, giving early and late phases EQUAL weight — do not `+
 		`over-emphasize the end, and do not drop earlier phases. Cover every distinct feature or workflow; `+
 		`a longer session warrants a longer summary.
@@ -180,22 +194,32 @@ func (c Config) MapWindow(ctx context.Context, window []types.Message) (string, 
 const maxReduceInputs = 40
 
 // ReduceSummaries consolidates chronological partial summaries into one final
-// summary anchored on goal, with length scaled to the session's scope. Empty
-// input yields an empty summary.
-func (c Config) ReduceSummaries(ctx context.Context, goal string, partials []string) (string, error) {
-	lo, hi := reduceSentenceRange(len(partials))
-	return c.reduceWithTarget(ctx, goal, partials, lo, hi)
+// summary anchored on goal, with length scaled to the session's scope. prior, if
+// non-empty, is an authoritative summary of the earlier portion of the session
+// (e.g. from a context compaction) that the result must integrate as the early
+// phases. Empty partials and empty prior yield an empty summary.
+func (c Config) ReduceSummaries(ctx context.Context, goal, prior string, partials []string) (string, error) {
+	// Size the budget to the whole session: a compaction anchor stands in for a
+	// large earlier span the partial count doesn't reflect.
+	scope := len(partials)
+	if prior != "" {
+		scope += 12
+	}
+	lo, hi := reduceSentenceRange(scope)
+	return c.reduceWithTarget(ctx, goal, prior, partials, lo, hi)
 }
 
 // reduceWithTarget keeps the original (scope-based) length target across the
 // hierarchical merge, so a huge session's final summary is sized to the whole
 // session — not to the small set of intermediate merges feeding the last pass.
-func (c Config) reduceWithTarget(ctx context.Context, goal string, partials []string, lo, hi int) (string, error) {
+// The prior (earlier-portion) summary is applied only at the final pass; the
+// intermediate merges combine post-compaction partials alone.
+func (c Config) reduceWithTarget(ctx context.Context, goal, prior string, partials []string, lo, hi int) (string, error) {
 	switch {
-	case len(partials) == 0:
+	case len(partials) == 0 && prior == "":
 		return "", nil
 	case len(partials) <= maxReduceInputs:
-		return c.complete(ctx, reducePrompt(lo, hi), renderReduce(goal, partials))
+		return c.complete(ctx, reducePrompt(lo, hi), renderReduce(goal, prior, partials))
 	}
 	var mids []string
 	for i := 0; i < len(partials); i += maxReduceInputs {
@@ -203,13 +227,13 @@ func (c Config) reduceWithTarget(ctx context.Context, goal string, partials []st
 		if end > len(partials) {
 			end = len(partials)
 		}
-		m, err := c.complete(ctx, mergeSystemPrompt, renderReduce(goal, partials[i:end]))
+		m, err := c.complete(ctx, mergeSystemPrompt, renderReduce("", "", partials[i:end]))
 		if err != nil {
 			return "", err
 		}
 		mids = append(mids, m)
 	}
-	return c.reduceWithTarget(ctx, goal, mids, lo, hi)
+	return c.reduceWithTarget(ctx, goal, prior, mids, lo, hi)
 }
 
 func renderWindow(window []types.Message) string {
@@ -231,7 +255,7 @@ func renderWindow(window []types.Message) string {
 	return b.String()
 }
 
-func renderReduce(goal string, partials []string) string {
+func renderReduce(goal, prior string, partials []string) string {
 	var b strings.Builder
 	b.WriteString("Opening goal:\n")
 	if strings.TrimSpace(goal) == "" {
@@ -239,9 +263,16 @@ func renderReduce(goal string, partials []string) string {
 	} else {
 		b.WriteString(strings.TrimSpace(goal) + "\n")
 	}
-	b.WriteString("\nPartial summaries (chronological):\n")
-	for i, p := range partials {
-		fmt.Fprintf(&b, "%d. %s\n", i+1, strings.TrimSpace(p))
+	if strings.TrimSpace(prior) != "" {
+		b.WriteString("\nEarlier portion of the session, already summarized by an automatic context " +
+			"compaction (authoritative for everything before the partials below):\n")
+		b.WriteString(strings.TrimSpace(prior) + "\n")
+	}
+	if len(partials) > 0 {
+		b.WriteString("\nPartial summaries (chronological):\n")
+		for i, p := range partials {
+			fmt.Fprintf(&b, "%d. %s\n", i+1, strings.TrimSpace(p))
+		}
 	}
 	return b.String()
 }

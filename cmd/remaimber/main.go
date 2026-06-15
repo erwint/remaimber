@@ -874,11 +874,26 @@ func summarizeCmd() *cobra.Command {
 // An empty session yields an empty summary, but the high-water mark still
 // advances so the session settles.
 func buildSummary(ctx context.Context, cfg summarizer.Config, database *sql.DB, sessionID, goal string) (string, int64, error) {
-	msgs, err := db.UserAssistantMessagesAfter(database, sessionID, 0)
+	newID, err := db.MaxUAMessageID(database, sessionID)
 	if err != nil {
 		return "", 0, err
 	}
-	newID, err := db.MaxUAMessageID(database, sessionID)
+
+	// Compaction handling: if the session was context-compacted, Claude's
+	// compaction summary already distills everything before it. Depending on the
+	// mode, anchor on it (and map only post-compaction messages), summarize only
+	// post-compaction, or ignore it and map the whole session.
+	fromID, prior := int64(0), ""
+	if cfg.CompactMode != "full" {
+		if text, compactID, ok := db.LatestCompactSummary(database, sessionID); ok {
+			fromID = compactID
+			if cfg.CompactMode == "anchor" {
+				prior = text
+			}
+		}
+	}
+
+	msgs, err := db.UserAssistantMessagesAfter(database, sessionID, fromID)
 	if err != nil {
 		return "", 0, err
 	}
@@ -900,15 +915,16 @@ func buildSummary(ctx context.Context, cfg summarizer.Config, database *sql.DB, 
 		}
 	}
 
-	// Reduce: consolidate. A single-window session needs no reduce pass.
+	// Reduce: consolidate. With no prior and a single window, the partial is the
+	// summary; otherwise consolidate (prior, if any, anchors the earlier portion).
 	var summary string
-	switch len(partials) {
-	case 0:
+	switch {
+	case prior == "" && len(partials) == 0:
 		return "", newID, nil
-	case 1:
+	case prior == "" && len(partials) == 1:
 		summary = partials[0]
 	default:
-		summary, err = cfg.ReduceSummaries(ctx, goal, partials)
+		summary, err = cfg.ReduceSummaries(ctx, goal, prior, partials)
 		if err != nil {
 			return "", 0, err
 		}

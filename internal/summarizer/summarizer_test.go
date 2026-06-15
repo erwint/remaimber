@@ -78,7 +78,7 @@ func TestRenderWindow(t *testing.T) {
 }
 
 func TestRenderReducePinsGoal(t *testing.T) {
-	out := renderReduce("add cross-worktree resume", []string{"first part", "second part"})
+	out := renderReduce("add cross-worktree resume", "", []string{"first part", "second part"})
 	if !strings.Contains(out, "Opening goal:\nadd cross-worktree resume") {
 		t.Errorf("goal not pinned:\n%s", out)
 	}
@@ -86,9 +86,19 @@ func TestRenderReducePinsGoal(t *testing.T) {
 		t.Errorf("partials not enumerated:\n%s", out)
 	}
 
-	out = renderReduce("", []string{"only part"})
+	out = renderReduce("", "", []string{"only part"})
 	if !strings.Contains(out, "(unknown)") {
 		t.Error("missing goal should render as (unknown)")
+	}
+}
+
+func TestRenderReduceIncludesPrior(t *testing.T) {
+	out := renderReduce("goal", "earlier compacted work on the parser", []string{"recent part"})
+	if !strings.Contains(out, "Earlier portion") || !strings.Contains(out, "earlier compacted work on the parser") {
+		t.Errorf("prior (earlier portion) not included:\n%s", out)
+	}
+	if !strings.Contains(out, "1. recent part") {
+		t.Errorf("partials should still be enumerated:\n%s", out)
 	}
 }
 
@@ -185,7 +195,7 @@ func TestReduceSummariesBatches(t *testing.T) {
 	c := Config{Backend: srv.URL, Model: "m"}
 
 	// Few partials -> single reduce call.
-	if _, err := c.ReduceSummaries(context.Background(), "goal", []string{"a", "b", "c"}); err != nil {
+	if _, err := c.ReduceSummaries(context.Background(), "goal", "", []string{"a", "b", "c"}); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 1 {
@@ -198,7 +208,7 @@ func TestReduceSummariesBatches(t *testing.T) {
 	for i := range many {
 		many[i] = "p"
 	}
-	if _, err := c.ReduceSummaries(context.Background(), "goal", many); err != nil {
+	if _, err := c.ReduceSummaries(context.Background(), "goal", "", many); err != nil {
 		t.Fatal(err)
 	}
 	if calls < 3 { // 2 batch reduces + 1 final
