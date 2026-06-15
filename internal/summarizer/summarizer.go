@@ -121,10 +121,10 @@ func reduceSentenceRange(numPartials int) (lo, hi int) {
 		return 2, 3
 	case numPartials <= 10:
 		return 3, 5
-	case numPartials <= 20:
-		return 5, 8
+	case numPartials <= 25:
+		return 4, 7
 	default:
-		return 8, 12
+		return 6, 8
 	}
 }
 

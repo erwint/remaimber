@@ -146,7 +146,7 @@ func TestReduceSentenceRangeScales(t *testing.T) {
 	if !(hi4 < hi16 && hi16 <= hi100) {
 		t.Errorf("budget should grow with scope: hi4=%d hi16=%d hi100=%d", hi4, hi16, hi100)
 	}
-	if lo4 < 1 || hi100 > 20 {
+	if lo4 < 1 || hi100 > 10 {
 		t.Errorf("range out of sane bounds: %d..%d", lo4, hi100)
 	}
 	if lo16 > hi16 {
