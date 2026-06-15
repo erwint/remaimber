@@ -106,6 +106,8 @@ func (c Config) IsHTTP() bool {
 const mapSystemPrompt = `Summarize this excerpt of a coding session in 1-2 plain sentences: ` +
 	`what was being worked on, the concrete actions and decisions, and especially any user-facing commands, ` +
 	`features, or workflows introduced. Name specific commands, flags, files, functions, libraries, or errors. ` +
+	`If this excerpt changes, reverses, rejects, or replaces an earlier approach or decision, say so explicitly ` +
+	`and name what replaced it. ` +
 	`Describe the work directly — never name an actor (no "the user", "the developer", "the assistant"). ` +
 	`Omit incidental identifiers (commit hashes, internal task or run IDs, temp paths) and transient status. ` +
 	`No preamble, no markdown. Output only the summary.`
@@ -138,6 +140,11 @@ You are given the session's opening goal and its partial summaries in chronologi
 		`over-emphasize the end, and do not drop earlier phases. Cover every distinct feature or workflow; `+
 		`a longer session warrants a longer summary.
 
+The partials are a timeline: when they conflict, or a later part reverses, corrects, or supersedes an `+
+		`earlier approach or decision, describe only the FINAL outcome. Never present an abandoned or superseded `+
+		`approach as if it were the result (e.g. if an early idea is later rejected in favor of another, mention `+
+		`only what was actually adopted).
+
 Prioritize, in this order:
 1. User-facing outcomes — the commands, features, and workflows delivered, and what someone can now DO. `+
 		`Name them concretely (slash commands, CLI subcommands, the actual user workflow).
@@ -157,6 +164,8 @@ Describe the work directly — never name an actor (no "the user", "the develope
 const mergeSystemPrompt = `Merge these partial summaries of a coding session into one thorough intermediate ` +
 	`summary that preserves every distinct feature, command, decision, file, and technology mentioned. ` +
 	`This will be consolidated again later, so favor completeness over brevity; do not compress aggressively. ` +
+	`The partials are chronological: preserve any reversals or replacements — note which approaches were later ` +
+	`rejected and what replaced them, so the final consolidation can keep only what was adopted. ` +
 	`Describe the work directly — never name an actor. Omit incidental identifiers (commit hashes, internal ` +
 	`task/run IDs, temp paths). No preamble, no markdown. Output only the summary.`
 

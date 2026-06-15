@@ -161,6 +161,19 @@ func TestReducePromptIncludesRange(t *testing.T) {
 	}
 }
 
+func TestPromptsHandleSupersession(t *testing.T) {
+	// The reduce prompt must instruct that later parts supersede earlier ones,
+	// so a reversed decision doesn't survive into the final summary.
+	r := reducePrompt(3, 5)
+	if !strings.Contains(r, "supersede") || !strings.Contains(r, "FINAL outcome") {
+		t.Errorf("reduce prompt missing supersession handling:\n%s", r)
+	}
+	// The map prompt must flag reversals so the signal reaches the reduce.
+	if !strings.Contains(mapSystemPrompt, "reverses") {
+		t.Error("map prompt should flag reversed/replaced approaches")
+	}
+}
+
 func TestReduceSummariesBatches(t *testing.T) {
 	var calls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
