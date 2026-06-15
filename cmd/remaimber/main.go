@@ -958,6 +958,30 @@ func reconcileSegments(ctx context.Context, cfg summarizer.Config, database *sql
 	if err != nil {
 		return "", 0, err
 	}
+
+	// Phase 2 — rewind handling, confined to the live span. A rewind can only
+	// touch the post-last-compaction span (frozen history can't be rewound into).
+	// ActivePathSet covers exactly that span (the parent chain resets at
+	// compaction), so drop abandoned-branch messages there while keeping all
+	// pre-compaction content unconditionally.
+	onPath, err := db.ActivePathSet(database, sessionID)
+	if err != nil {
+		return "", 0, err
+	}
+	if onPath != nil {
+		var lastComp int64
+		if len(compactions) > 0 {
+			lastComp = compactions[len(compactions)-1]
+		}
+		kept := content[:0:0]
+		for _, m := range content {
+			if m.ID <= lastComp || onPath[m.UUID] {
+				kept = append(kept, m)
+			}
+		}
+		content = kept
+	}
+
 	plan := db.PlanSegments(content, compactions, segmentCap())
 	stored, err := db.GetSegments(database, sessionID)
 	if err != nil {
