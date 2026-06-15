@@ -19,9 +19,10 @@ type Session struct {
 	LastByteOffset int64   `json:"-"`
 	ImportedAt     string  `json:"imported_at,omitempty"`
 
-	// Rolling summary (Phase 5).
+	// Rolling summary (Phase 5). SummaryOffset is the message-id high-water mark
+	// the summary reflects.
 	Summary       string `json:"summary,omitempty"`
-	SummaryOffset int    `json:"-"`
+	SummaryOffset int64  `json:"-"`
 
 	// Durable cross-worktree identity, populated via LEFT JOIN session_identity.
 	RepoID       string `json:"repo_id,omitempty"`

@@ -31,7 +31,7 @@ func TestUserAssistantMessagesFiltersToolNoise(t *testing.T) {
 		ContentText: "Let me check the tests.\n[tool: Bash]", ContentJSON: `{"type":"assistant"}`})
 	tx.Commit()
 
-	msgs, err := UserAssistantMessages(database, "s")
+	msgs, err := UserAssistantMessagesAfter(database, "s", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,11 +82,12 @@ func TestSessionsNeedingSummary(t *testing.T) {
 	if len(work) != 1 {
 		t.Fatalf("expected 1 session needing summary, got %d", len(work))
 	}
-	if work[0].UACount != 6 {
-		t.Errorf("UACount = %d, want 6 (non-conversational excluded)", work[0].UACount)
+	if work[0].NewCount != 6 {
+		t.Errorf("NewCount = %d, want 6 (non-conversational excluded)", work[0].NewCount)
 	}
 
-	// After summarizing up to offset 6, it no longer needs work.
+	// After catching the high-water mark up to the last user/assistant id (6),
+	// it no longer needs work.
 	if err := UpdateSummary(database, "s1", "did stuff", 6); err != nil {
 		t.Fatal(err)
 	}
