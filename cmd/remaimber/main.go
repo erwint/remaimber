@@ -806,7 +806,6 @@ func isLikelyLive(s *types.Session) bool {
 // message count has grown past the threshold.
 func summarizeCmd() *cobra.Command {
 	var minNew int
-	var force bool
 	cmd := &cobra.Command{
 		Use:   "summarize [session-id]",
 		Short: "Generate or update rolling summaries of sessions",
@@ -843,11 +842,7 @@ func summarizeCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				prev, afterID := sess.Summary, sess.SummaryOffset
-				if force {
-					prev, afterID = "", 0 // rebuild from scratch
-				}
-				summary, newID, err := foldSummary(cmd.Context(), cfg, database, sessionID, prev, afterID)
+				summary, newID, err := buildSummary(cmd.Context(), cfg, database, sessionID, sess.FirstPrompt)
 				if err != nil {
 					return err
 				}
@@ -868,39 +863,57 @@ func summarizeCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().IntVar(&minNew, "min", 6, "Minimum new user/assistant messages before (re)summarizing")
-	cmd.Flags().BoolVar(&force, "force", false, "Rebuild the summary from scratch (single session only)")
 	return cmd
 }
 
-// foldSummary folds the salient user/assistant messages newer than afterID into
-// prev (windowed), returning the updated summary and the new message-id
-// high-water mark. When no new salient messages exist (e.g. only tool output
-// arrived), prev is returned unchanged but the high-water mark still advances so
-// the session settles and isn't reconsidered until genuinely new content lands.
-func foldSummary(ctx context.Context, cfg summarizer.Config, database *sql.DB, sessionID, prev string, afterID int64) (string, int64, error) {
-	msgs, err := db.UserAssistantMessagesAfter(database, sessionID, afterID)
+// buildSummary builds a session's summary map-reduce: each window of salient
+// messages is summarized independently (map), then the window summaries are
+// consolidated into one, anchored on goal (the opening prompt). It rebuilds from
+// the whole session each time — avoiding the recency bias of an incremental fold
+// — and returns the summary plus the message-id high-water mark it now reflects.
+// An empty session yields an empty summary, but the high-water mark still
+// advances so the session settles.
+func buildSummary(ctx context.Context, cfg summarizer.Config, database *sql.DB, sessionID, goal string) (string, int64, error) {
+	msgs, err := db.UserAssistantMessagesAfter(database, sessionID, 0)
 	if err != nil {
 		return "", 0, err
-	}
-	window := cfg.WindowSize()
-	for i := 0; i < len(msgs); i += window {
-		end := i + window
-		if end > len(msgs) {
-			end = len(msgs)
-		}
-		updated, err := cfg.Summarize(ctx, prev, msgs[i:end])
-		if err != nil {
-			return "", 0, err
-		}
-		if updated != "" {
-			prev = updated
-		}
 	}
 	newID, err := db.MaxUAMessageID(database, sessionID)
 	if err != nil {
 		return "", 0, err
 	}
-	return prev, newID, nil
+
+	// Map: an independent summary per window.
+	window := cfg.WindowSize()
+	var partials []string
+	for i := 0; i < len(msgs); i += window {
+		end := i + window
+		if end > len(msgs) {
+			end = len(msgs)
+		}
+		p, err := cfg.MapWindow(ctx, msgs[i:end])
+		if err != nil {
+			return "", 0, err
+		}
+		if strings.TrimSpace(p) != "" {
+			partials = append(partials, p)
+		}
+	}
+
+	// Reduce: consolidate. A single-window session needs no reduce pass.
+	var summary string
+	switch len(partials) {
+	case 0:
+		return "", newID, nil
+	case 1:
+		summary = partials[0]
+	default:
+		summary, err = cfg.ReduceSummaries(ctx, goal, partials)
+		if err != nil {
+			return "", 0, err
+		}
+	}
+	return summarizer.StripEphemeral(summary), newID, nil
 }
 
 // summarizeBlockedInSession reports whether summarization must be skipped because
@@ -921,7 +934,7 @@ func runBatchSummarize(ctx context.Context, cfg summarizer.Config, database *sql
 		return 0, err
 	}
 	for _, w := range work {
-		summary, newID, err := foldSummary(ctx, cfg, database, w.SessionID, w.Summary, w.AfterID)
+		summary, newID, err := buildSummary(ctx, cfg, database, w.SessionID, w.FirstPrompt)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "summarize %s: %v\n", shortID(w.SessionID), err)
 			continue
