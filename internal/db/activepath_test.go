@@ -39,10 +39,9 @@ func TestActivePathSetRewind(t *testing.T) {
 	}
 }
 
-// A compaction resets the parent chain, so ActivePathSet covers only the span
-// since the last compaction — the caller must keep pre-compaction content
-// unconditionally (it is frozen and unreachable by a rewind).
-func TestActivePathSetStopsAtCompactionReset(t *testing.T) {
+// A compaction resets the parent chain, so the walk must BRIDGE across it to
+// include the pre-compaction span (which is still live after a plain compaction).
+func TestActivePathSetBridgesCompaction(t *testing.T) {
 	database := testDB(t)
 	insertSession(t, database, &types.Session{SessionID: "s", ProjectKey: "-p"})
 	tx, _ := database.Begin()
@@ -52,17 +51,46 @@ func TestActivePathSetStopsAtCompactionReset(t *testing.T) {
 	}
 	add("old1", "", `{"type":"assistant"}`)
 	add("old2", "old1", `{"type":"assistant"}`)
-	// compaction summary with a reset parent chain (parent empty), then live content
-	add("comp", "", `{"type":"user","isCompactSummary":true}`)
+	add("comp", "", `{"type":"user","isCompactSummary":true}`) // reset parent chain
 	add("new1", "comp", `{"type":"assistant"}`)
 	tx.Commit()
 
 	onPath, _ := ActivePathSet(database, "s")
-	if !onPath["new1"] || !onPath["comp"] {
-		t.Errorf("live span should be on path: %+v", onPath)
+	for _, u := range []string{"old1", "old2", "comp", "new1"} {
+		if !onPath[u] {
+			t.Errorf("%s should be on path (compaction keeps everything; chain bridged): %+v", u, onPath)
+		}
 	}
-	if onPath["old1"] || onPath["old2"] {
-		t.Error("pre-compaction messages are not reachable via the reset chain (caller keeps them unconditionally)")
+}
+
+// A rewind to a point BEFORE a compaction abandons everything after the rewind
+// target — including the compaction and its post-compaction content.
+func TestActivePathSetRewindPastCompaction(t *testing.T) {
+	database := testDB(t)
+	insertSession(t, database, &types.Session{SessionID: "s", ProjectKey: "-p"})
+	tx, _ := database.Begin()
+	add := func(uuid, parent, json string) {
+		InsertMessage(tx, &types.Message{SessionID: "s", UUID: uuid, ParentUUID: parent,
+			Type: "assistant", Role: "assistant", ContentText: uuid, ContentJSON: json})
+	}
+	add("old0", "", `{"type":"assistant"}`)
+	add("old1", "old0", `{"type":"assistant"}`)
+	add("old2", "old1", `{"type":"assistant"}`)
+	add("comp", "", `{"type":"user","isCompactSummary":true}`)
+	add("new1", "comp", `{"type":"assistant"}`)
+	add("rw", "old1", `{"type":"assistant"}`) // rewind to old1 (before the compaction); newest = head
+	tx.Commit()
+
+	onPath, _ := ActivePathSet(database, "s")
+	for _, u := range []string{"rw", "old1", "old0"} {
+		if !onPath[u] {
+			t.Errorf("%s should be on the active (rewound) path: %+v", u, onPath)
+		}
+	}
+	for _, u := range []string{"old2", "comp", "new1"} {
+		if onPath[u] {
+			t.Errorf("%s was abandoned by the rewind and must be off path", u)
+		}
 	}
 }
 
