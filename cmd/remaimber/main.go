@@ -843,15 +843,15 @@ func summarizeCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				offset := 0
-				if !force {
-					offset = sess.SummaryOffset
+				prev, afterID := sess.Summary, sess.SummaryOffset
+				if force {
+					prev, afterID = "", 0 // rebuild from scratch
 				}
-				summary, n, err := foldSummary(cmd.Context(), cfg, database, sessionID, sess.Summary, offset)
+				summary, newID, err := foldSummary(cmd.Context(), cfg, database, sessionID, prev, afterID)
 				if err != nil {
 					return err
 				}
-				if err := db.UpdateSummary(database, sessionID, summary, n); err != nil {
+				if err := db.UpdateSummary(database, sessionID, summary, newID); err != nil {
 					return err
 				}
 				mover.SetIndexSummary(sess.ProjectKey, sessionID, summary) // best-effort
@@ -872,20 +872,18 @@ func summarizeCmd() *cobra.Command {
 	return cmd
 }
 
-// foldSummary folds successive windows of a session's user/assistant messages
-// (starting at offset) into prev, returning the updated summary and the new
-// offset (total user/assistant message count consumed).
-func foldSummary(ctx context.Context, cfg summarizer.Config, database *sql.DB, sessionID, prev string, offset int) (string, int, error) {
-	msgs, err := db.UserAssistantMessages(database, sessionID)
+// foldSummary folds the salient user/assistant messages newer than afterID into
+// prev (windowed), returning the updated summary and the new message-id
+// high-water mark. When no new salient messages exist (e.g. only tool output
+// arrived), prev is returned unchanged but the high-water mark still advances so
+// the session settles and isn't reconsidered until genuinely new content lands.
+func foldSummary(ctx context.Context, cfg summarizer.Config, database *sql.DB, sessionID, prev string, afterID int64) (string, int64, error) {
+	msgs, err := db.UserAssistantMessagesAfter(database, sessionID, afterID)
 	if err != nil {
 		return "", 0, err
 	}
-	if offset < 0 || offset > len(msgs) {
-		offset = 0
-		prev = ""
-	}
 	window := cfg.WindowSize()
-	for i := offset; i < len(msgs); i += window {
+	for i := 0; i < len(msgs); i += window {
 		end := i + window
 		if end > len(msgs) {
 			end = len(msgs)
@@ -898,7 +896,11 @@ func foldSummary(ctx context.Context, cfg summarizer.Config, database *sql.DB, s
 			prev = updated
 		}
 	}
-	return prev, len(msgs), nil
+	newID, err := db.MaxUAMessageID(database, sessionID)
+	if err != nil {
+		return "", 0, err
+	}
+	return prev, newID, nil
 }
 
 // summarizeBlockedInSession reports whether summarization must be skipped because
@@ -919,12 +921,12 @@ func runBatchSummarize(ctx context.Context, cfg summarizer.Config, database *sql
 		return 0, err
 	}
 	for _, w := range work {
-		summary, n, err := foldSummary(ctx, cfg, database, w.SessionID, w.Summary, w.Offset)
+		summary, newID, err := foldSummary(ctx, cfg, database, w.SessionID, w.Summary, w.AfterID)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "summarize %s: %v\n", shortID(w.SessionID), err)
 			continue
 		}
-		if err := db.UpdateSummary(database, w.SessionID, summary, n); err != nil {
+		if err := db.UpdateSummary(database, w.SessionID, summary, newID); err != nil {
 			return done, err
 		}
 		mover.SetIndexSummary(w.ProjectKey, w.SessionID, summary) // best-effort
