@@ -116,6 +116,19 @@ func TestStripEphemeral(t *testing.T) {
 	}
 }
 
+func TestRenderAmend(t *testing.T) {
+	out := renderAmend("segment so far", []types.Message{{Role: "user", ContentText: "next thing"}})
+	if !strings.Contains(out, "Segment summary so far:\nsegment so far") {
+		t.Errorf("amend prompt missing prior segment summary:\n%s", out)
+	}
+	if !strings.Contains(out, "[user] next thing") {
+		t.Errorf("amend prompt missing new messages:\n%s", out)
+	}
+	if !strings.Contains(renderAmend("", nil), "none yet") {
+		t.Error("empty prior should render as none yet")
+	}
+}
+
 func TestMapWindowHTTP(t *testing.T) {
 	var sawSystem string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

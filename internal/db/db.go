@@ -88,6 +88,28 @@ CREATE TABLE IF NOT EXISTS session_identity (
 
 CREATE INDEX IF NOT EXISTS idx_identity_repo    ON session_identity(repo_id);
 CREATE INDEX IF NOT EXISTS idx_identity_subpath ON session_identity(repo_id, subpath);
+
+-- Per-conversation summary segments. A session is a sequence of segments split at
+-- context-compaction boundaries and at a size cap; all but the last are frozen
+-- (closed). Boundaries are keyed by message uuid as well as id so a later phase
+-- can validate them against the active conversation path (rewind/restore).
+CREATE TABLE IF NOT EXISTS session_segments (
+	session_id  TEXT NOT NULL,
+	seq         INTEGER NOT NULL,   -- order within the session, 0-based
+	start_id    INTEGER NOT NULL,   -- first content message id (inclusive)
+	end_id      INTEGER,            -- last content message id (inclusive)
+	start_uuid  TEXT,
+	end_uuid    TEXT,
+	summary     TEXT,
+	msg_count   INTEGER DEFAULT 0,  -- content messages folded into this segment
+	high_water  INTEGER DEFAULT 0,  -- last content id folded (for the open segment)
+	closed      INTEGER DEFAULT 0,  -- 1 = frozen/immutable
+	reason      TEXT,               -- why it closed: 'compaction' | 'sizecap'
+	updated_at  TEXT,
+	PRIMARY KEY (session_id, seq)
+);
+
+CREATE INDEX IF NOT EXISTS idx_segments_session ON session_segments(session_id);
 `
 
 // migrations are idempotent ALTER statements applied after the schema. SQLite

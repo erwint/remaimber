@@ -149,7 +149,9 @@ func reducePrompt(loSentences, hiSentences int) string {
 You are given the session's opening goal, optionally a summary of the earlier portion (from an automatic `+
 		`context compaction), and partial summaries of the rest in chronological order. `+
 		`If an earlier-portion summary is present, treat it as authoritative for everything before the partials `+
-		`and fold its substance in as the early phases. `+
+		`and fold its substance in as the early phases; you may describe that early span at a slightly higher `+
+		`level, but keep the most recent work (the later partials) concrete — preserve the specific files, `+
+		`functions, fields, commands, and errors they name. `+
 		`Produce one cohesive summary of the WHOLE session, giving early and late phases EQUAL weight — do not `+
 		`over-emphasize the end, and do not drop earlier phases. Cover every distinct feature or workflow; `+
 		`a longer session warrants a longer summary.
@@ -186,6 +188,35 @@ const mergeSystemPrompt = `Merge these partial summaries of a coding session int
 // MapWindow summarizes a single window of messages independently (the map step).
 func (c Config) MapWindow(ctx context.Context, window []types.Message) (string, error) {
 	return c.complete(ctx, mapSystemPrompt, renderWindow(window))
+}
+
+const amendSystemPrompt = `You maintain a concise, recall-optimized summary of ONE segment of a coding ` +
+	`session. You are given the segment's summary so far and the next messages (oldest to newest). ` +
+	`Update the summary to incorporate the new messages: keep prior facts, fold in what is new, and if a new ` +
+	`message reverses or replaces an earlier approach, describe only the final outcome (not the abandoned one). ` +
+	`Capture user-facing commands, features, and workflows, and name specific files, functions, fields, ` +
+	`commands, and errors. Describe the work directly — never name an actor (no "the user", "the developer"). ` +
+	`Omit incidental identifiers (commit hashes, internal task or run IDs, temp paths) and transient status. ` +
+	`Write 1-4 plain sentences, no preamble, no markdown. Output only the summary.`
+
+// Amend folds a window of new messages into a segment's running summary (prev may
+// be empty for a fresh segment). This is the per-segment incremental primitive:
+// because a segment is bounded, a simple fold has no meaningful recency bias.
+func (c Config) Amend(ctx context.Context, prev string, window []types.Message) (string, error) {
+	return c.complete(ctx, amendSystemPrompt, renderAmend(prev, window))
+}
+
+func renderAmend(prev string, window []types.Message) string {
+	var b strings.Builder
+	b.WriteString("Segment summary so far:\n")
+	if strings.TrimSpace(prev) == "" {
+		b.WriteString("(none yet — start of this segment)\n")
+	} else {
+		b.WriteString(strings.TrimSpace(prev) + "\n")
+	}
+	b.WriteString("\nNew messages (oldest to newest):\n")
+	b.WriteString(renderWindow(window))
+	return b.String()
 }
 
 // maxReduceInputs bounds how many partial summaries go into one reduce call, so
