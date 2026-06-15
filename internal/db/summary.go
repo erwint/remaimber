@@ -33,11 +33,12 @@ func isToolOnly(text string) bool {
 // message-id high-water mark the current summary already reflects; folding
 // resumes from messages newer than it.
 type SummaryWork struct {
-	SessionID  string
-	Summary    string
-	AfterID    int64 // summary covers messages up to and including this id
-	NewCount   int   // user/assistant messages newer than AfterID
-	ProjectKey string
+	SessionID   string
+	Summary     string
+	AfterID     int64 // summary covers messages up to and including this id
+	NewCount    int   // user/assistant messages newer than AfterID
+	ProjectKey  string
+	FirstPrompt string // opening user prompt, the pinned goal for the reduce step
 }
 
 // SessionsNeedingSummary returns sessions that have at least minNew user/assistant
@@ -51,7 +52,7 @@ func SessionsNeedingSummary(db *sql.DB, minNew int) ([]SummaryWork, error) {
 	}
 	rows, err := db.Query(`
 		SELECT s.session_id, COALESCE(s.summary,''), COALESCE(s.summary_offset,0),
-			COUNT(m.id), s.project_key
+			COUNT(m.id), s.project_key, COALESCE(s.first_prompt,'')
 		FROM sessions s
 		LEFT JOIN messages m
 			ON m.session_id = s.session_id AND m.role IN ('user','assistant')
@@ -67,7 +68,7 @@ func SessionsNeedingSummary(db *sql.DB, minNew int) ([]SummaryWork, error) {
 	var out []SummaryWork
 	for rows.Next() {
 		var w SummaryWork
-		if err := rows.Scan(&w.SessionID, &w.Summary, &w.AfterID, &w.NewCount, &w.ProjectKey); err != nil {
+		if err := rows.Scan(&w.SessionID, &w.Summary, &w.AfterID, &w.NewCount, &w.ProjectKey, &w.FirstPrompt); err != nil {
 			return nil, err
 		}
 		out = append(out, w)
@@ -96,11 +97,11 @@ func MaxUAMessageID(db *sql.DB, sessionID string) (int64, error) {
 // summaryTextCap bounds how much of each message's text is loaded for
 // summarization. Summaries don't need full message bodies, and loading the raw
 // content_json of a large session can spike memory into the gigabytes (enough to
-// be OOM-killed). renderPrompt truncates further; this just caps memory.
+// be OOM-killed). The map step truncates further; this just caps memory.
 const summaryTextCap = 2000
 
 // UserAssistantMessagesAfter returns a session's salient user/assistant messages
-// with id greater than afterID, in order — the input to incremental folding.
+// with id greater than afterID, in order — the input to the map step.
 //
 // Selects only what summarization needs (role/type/text) — crucially NOT
 // content_json — and caps text length in SQL so a giant session can't blow up

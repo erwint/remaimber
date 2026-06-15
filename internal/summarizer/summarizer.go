@@ -1,7 +1,9 @@
-// Package summarizer maintains short rolling summaries of conversation sessions
-// by folding successive message windows through an LLM. The backend is pluggable
-// via environment variables: the local `claude` CLI (default, uses existing
-// auth) or any OpenAI-compatible chat-completions endpoint (e.g. Ollama).
+// Package summarizer builds short, recall-optimized summaries of conversation
+// sessions via map-reduce: each window of messages is summarized independently
+// (map), then the window summaries are consolidated into one, anchored on the
+// session's opening goal (reduce). The backend is pluggable via environment
+// variables: the local `claude` CLI (default, uses existing auth) or any
+// OpenAI-compatible chat-completions endpoint (e.g. Ollama).
 package summarizer
 
 import (
@@ -13,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -95,43 +98,66 @@ func (c Config) IsHTTP() bool {
 	return strings.HasPrefix(c.Backend, "http://") || strings.HasPrefix(c.Backend, "https://")
 }
 
-const systemPrompt = `You maintain a running, recall-optimized summary of a Claude Code coding session. ` +
-	`The summary exists so that someone can later FIND and resume this exact session by skimming or searching it, ` +
-	`so it must be specific and keyword-rich.
+// Summaries are built map-reduce rather than by a left fold: each window is
+// summarized independently (map), then all window summaries are consolidated
+// into one (reduce), anchored on the session's opening goal. This avoids the
+// recency bias of folding, where late windows dominate and early work is lost.
 
-You receive the summary so far and the next batch of messages (oldest to newest). ` +
-	`Produce ONE updated summary that integrates them: keep still-relevant facts from the prior summary, ` +
-	`fold in what is new, and refresh the "current state". Do not describe only the latest messages, ` +
-	`and do not drop earlier work just because newer messages arrived.
+const mapSystemPrompt = `Summarize this excerpt of a coding session in 1-2 plain sentences: ` +
+	`what was being worked on, the concrete actions and decisions, and any specific files, ` +
+	`functions, commands, flags, libraries, or errors named. ` +
+	`Omit incidental identifiers (commit hashes, internal task or run IDs, temp paths) and transient status. ` +
+	`Neutral third person, no preamble, no markdown. Output only the summary.`
 
-Capture concretely:
-- the main goal or topic of the session
-- specific things built, changed, decided, or debugged — name real files, functions, commands, flags, libraries, and error messages
-- the current state and anything left unfinished or planned next
+const reduceSystemPrompt = `You are consolidating partial summaries of a single Claude Code coding session ` +
+	`into ONE recall-optimized summary that lets someone later find and resume this exact session.
 
-Write 2-4 plain sentences (at most ~80 words). Be concrete and searchable. ` +
-	`Use neutral third person (no "the user"), no preamble, no markdown, no bullet points. ` +
-	`Output ONLY the summary text.`
+You are given the session's opening goal and its partial summaries in chronological order. ` +
+	`Produce one cohesive summary of the WHOLE session: state the overall goal/topic, then the major things ` +
+	`built, changed, decided, or debugged across ALL parts — give early and late work equal weight, do not ` +
+	`over-emphasize the end, and do not drop earlier phases — then the final state and anything left to do. ` +
+	`Name concrete files, features, commands, and technologies.
 
-// Summarize folds a window of new messages into the previous summary, returning
-// the updated summary. prev may be empty for the first window.
-func (c Config) Summarize(ctx context.Context, prev string, window []types.Message) (string, error) {
-	user := renderPrompt(prev, window)
-	if c.IsHTTP() {
-		return c.summarizeHTTP(ctx, user)
-	}
-	return c.summarizeClaude(ctx, user)
+Omit incidental artifacts: commit hashes, internal task/run/batch IDs, temp paths, and transient status ` +
+	`like "currently processing". Use neutral third person (no "the user"), 2-5 sentences, no preamble, ` +
+	`no markdown, no bullet points. Output only the summary text.`
+
+// MapWindow summarizes a single window of messages independently (the map step).
+func (c Config) MapWindow(ctx context.Context, window []types.Message) (string, error) {
+	return c.complete(ctx, mapSystemPrompt, renderWindow(window))
 }
 
-func renderPrompt(prev string, window []types.Message) string {
-	var b strings.Builder
-	b.WriteString("Summary so far:\n")
-	if prev == "" {
-		b.WriteString("(none yet — this is the start of the session)\n")
-	} else {
-		b.WriteString(prev + "\n")
+// maxReduceInputs bounds how many partial summaries go into one reduce call, so
+// a very long session stays within model context. Excess is reduced
+// hierarchically (reduce batches, then reduce the batch results).
+const maxReduceInputs = 40
+
+// ReduceSummaries consolidates chronological partial summaries into one final
+// summary anchored on goal. Empty input yields an empty summary.
+func (c Config) ReduceSummaries(ctx context.Context, goal string, partials []string) (string, error) {
+	switch {
+	case len(partials) == 0:
+		return "", nil
+	case len(partials) <= maxReduceInputs:
+		return c.complete(ctx, reduceSystemPrompt, renderReduce(goal, partials))
 	}
-	b.WriteString("\nNew messages (oldest to newest):\n")
+	var mids []string
+	for i := 0; i < len(partials); i += maxReduceInputs {
+		end := i + maxReduceInputs
+		if end > len(partials) {
+			end = len(partials)
+		}
+		m, err := c.complete(ctx, reduceSystemPrompt, renderReduce(goal, partials[i:end]))
+		if err != nil {
+			return "", err
+		}
+		mids = append(mids, m)
+	}
+	return c.ReduceSummaries(ctx, goal, mids)
+}
+
+func renderWindow(window []types.Message) string {
+	var b strings.Builder
 	for _, m := range window {
 		text := strings.TrimSpace(m.ContentText)
 		if text == "" {
@@ -149,13 +175,57 @@ func renderPrompt(prev string, window []types.Message) string {
 	return b.String()
 }
 
-// summarizeClaude shells out to `claude -p`, passing the prompt on stdin so it
+func renderReduce(goal string, partials []string) string {
+	var b strings.Builder
+	b.WriteString("Opening goal:\n")
+	if strings.TrimSpace(goal) == "" {
+		b.WriteString("(unknown)\n")
+	} else {
+		b.WriteString(strings.TrimSpace(goal) + "\n")
+	}
+	b.WriteString("\nPartial summaries (chronological):\n")
+	for i, p := range partials {
+		fmt.Fprintf(&b, "%d. %s\n", i+1, strings.TrimSpace(p))
+	}
+	return b.String()
+}
+
+var (
+	reCommit     = regexp.MustCompile(`(?i)\(?\bcommits?\b[:\s]+[0-9a-f]{7,40}\)?`)
+	reParenLabel = regexp.MustCompile(`(?i)\s*\((?:run|batch|task|id|session)\b[^)]*\)`)
+	reParenID    = regexp.MustCompile(`\s*\([a-z]{1,3}[0-9][a-z0-9]{6,}\)`)
+	reMultiSpace = regexp.MustCompile(`\s{2,}`)
+)
+
+// StripEphemeral removes incidental identifiers a model may carry over from tool
+// output — commit hashes, internal task/run IDs — that are noise for recall and
+// often stale. The reduce prompt asks the model to omit these; this is a safety
+// net for the obvious patterns. Conservative by design to avoid eating prose.
+func StripEphemeral(s string) string {
+	s = reCommit.ReplaceAllString(s, "")
+	s = reParenLabel.ReplaceAllString(s, "")
+	s = reParenID.ReplaceAllString(s, "")
+	s = reMultiSpace.ReplaceAllString(s, " ")
+	s = strings.ReplaceAll(s, " .", ".")
+	s = strings.ReplaceAll(s, " ,", ",")
+	return strings.TrimSpace(s)
+}
+
+// complete dispatches one (system, user) prompt to the configured backend.
+func (c Config) complete(ctx context.Context, system, user string) (string, error) {
+	if c.IsHTTP() {
+		return c.completeHTTP(ctx, system, user)
+	}
+	return c.completeClaude(ctx, system, user)
+}
+
+// completeClaude shells out to `claude -p`, passing the prompt on stdin so it
 // is not subject to argv length limits.
-func (c Config) summarizeClaude(ctx context.Context, user string) (string, error) {
+func (c Config) completeClaude(ctx context.Context, system, user string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.timeout())
 	defer cancel()
 
-	args := []string{"-p", "--append-system-prompt", systemPrompt}
+	args := []string{"-p", "--append-system-prompt", system}
 	if c.Model != "" {
 		args = append(args, "--model", c.Model)
 	}
@@ -170,8 +240,8 @@ func (c Config) summarizeClaude(ctx context.Context, user string) (string, error
 	return strings.TrimSpace(out.String()), nil
 }
 
-// summarizeHTTP calls an OpenAI-compatible /chat/completions endpoint.
-func (c Config) summarizeHTTP(ctx context.Context, user string) (string, error) {
+// completeHTTP calls an OpenAI-compatible /chat/completions endpoint.
+func (c Config) completeHTTP(ctx context.Context, system, user string) (string, error) {
 	if c.Model == "" {
 		return "", fmt.Errorf("REMAIMBER_LLM_MODEL is required for the HTTP backend")
 	}
@@ -182,7 +252,7 @@ func (c Config) summarizeHTTP(ctx context.Context, user string) (string, error) 
 		"model":  c.Model,
 		"stream": false,
 		"messages": []map[string]string{
-			{"role": "system", "content": systemPrompt},
+			{"role": "system", "content": system},
 			{"role": "user", "content": user},
 		},
 	})
