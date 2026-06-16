@@ -377,18 +377,21 @@ func listCmd() *cobra.Command {
 			}
 
 			for _, s := range sessions {
-				title := s.CustomTitle
-				if title == "" {
-					title = truncate(s.FirstPrompt, 50)
-				}
 				resumable := " "
 				if importer.SessionFileExists(s.ProjectKey, s.SessionID) {
 					resumable = "*"
 				}
+				label := s.CustomTitle
+				if label == "" {
+					label = truncate(s.FirstPrompt, 50)
+				}
 				fmt.Printf("%s %-36s  %-20s  %s  [%d msgs]\n",
-					resumable, s.SessionID, importer.PrettyProjectName(s.ProjectKey), title, s.MessageCount)
+					resumable, s.SessionID, importer.PrettyProjectName(s.ProjectKey), label, s.MessageCount)
 				if loc := sessionLocation(s); loc != "" {
 					fmt.Printf("    %s\n", loc)
+				}
+				if s.Summary != "" {
+					fmt.Printf("    %s\n", truncate(strings.ReplaceAll(s.Summary, "\n", " "), 110))
 				}
 			}
 			if len(sessions) == 0 {
