@@ -28,7 +28,6 @@ import (
 
 var (
 	version = "dev"
-	commit  = "none"
 	date    = "unknown"
 	dbPath  string
 )
@@ -37,7 +36,7 @@ func main() {
 	root := &cobra.Command{
 		Use:     "remaimber",
 		Short:   "Archive and search Claude Code conversations",
-		Version: fmt.Sprintf("%s (commit: %s, built: %s)", version, commit, date),
+		Version: fmt.Sprintf("%s (built: %s)", version, date),
 	}
 
 	root.PersistentFlags().StringVar(&dbPath, "db", "", "Database path (default: ~/.claude/remaimber/remaimber.db, or REMAIMBER_DB env)")
