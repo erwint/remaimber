@@ -20,8 +20,9 @@ type Session struct {
 	ImportedAt     string  `json:"imported_at,omitempty"`
 
 	// Rolling summary (Phase 5). SummaryOffset is the message-id high-water mark
-	// the summary reflects.
-	Summary       string `json:"summary,omitempty"`
+	// the summary reflects. Always emitted (even empty) so consumers get a stable
+	// schema and can tell "no summary yet" from a missing field.
+	Summary       string `json:"summary"`
 	SummaryOffset int64  `json:"-"`
 
 	// Durable cross-worktree identity, populated via LEFT JOIN session_identity.
