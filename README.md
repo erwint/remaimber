@@ -111,17 +111,14 @@ Summaries are produced by a **throttled background sweep** (`summarize-if-stale`
 
 The rolling summary is **offset-based and incremental**, so the sweep also checkpoints *active* sessions (not just finished ones) — each pass folds only the messages added since the last summary. That way, if the machine is killed mid-session, the latest checkpoint (at most one throttle interval old) survives on disk and the session is still recallable by its summary, not just by full-text search. (This assumes `~/.claude` is persisted across restarts, which it normally is — that's where both the archive DB and Claude's transcripts live.)
 
-**The `claude` backend cannot run inside a Claude session** (it would nest `claude -p` — recursion and cost), so the sweep self-skips whenever it's invoked with the `claude` backend inside a session (detected via `CLAUDECODE`). Net effect:
+Both backends run from hooks, including inside a live Claude session:
 
-- **Local/HTTP backend** (Ollama, LM Studio, …): summaries happen automatically from hooks — no nesting constraint.
-- **`claude` backend**: hooks are a no-op; generate summaries **out-of-session** instead, manually (`remaimber summarize`) or on a schedule:
+- **Local/HTTP backend** (Ollama, LM Studio, …): a plain HTTP call, no constraints.
+- **`claude` backend**: invoked as `claude -p --no-session-persistence --model haiku`. `--no-session-persistence` means the summarization call creates no session of its own, so it runs fine nested inside a Claude session and fires no lifecycle hooks (no recursion). It needs the `claude` binary and auth available in the hook's environment; where that isn't the case (headless/corporate), use the local/HTTP backend.
 
-```bash
-# crontab: summarize every 30 minutes, outside any Claude session
-*/30 * * * * /Users/you/.local/bin/remaimber summarize >/dev/null 2>&1
-```
+Summarization treats the conversation transcript as **untrusted data** — the system prompt instructs the model never to follow instructions found inside it and to reply with only the summary, guarding against prompt injection from archived content.
 
-Liveness, similarly, does not depend on a clean `SessionEnd`: a session is considered "still running" only if its transcript file was modified in the last few minutes, so a killed session correctly ages out on its own.
+Liveness does not depend on a clean `SessionEnd`: a session is considered "still running" only if its transcript file was modified in the last few minutes, so a killed session correctly ages out on its own.
 
 ## How it works
 

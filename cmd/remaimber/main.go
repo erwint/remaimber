@@ -818,20 +818,6 @@ func summarizeCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg := summarizer.LoadConfig()
 
-			// The `claude` backend shells out to `claude -p`, which must not run
-			// nested inside a live Claude Code session or hook (recursion, cost,
-			// and Claude refuses to launch inside itself). Every hook runs with
-			// CLAUDECODE set, so skip cleanly there. Summaries via the `claude`
-			// backend are produced out-of-session: a manual run or a cron/launchd
-			// job. A local OpenAI-compatible backend has no such constraint and
-			// runs fine from hooks.
-			if summarizeBlockedInSession(cfg) {
-				fmt.Println("Skipping: the 'claude' summary backend can't run inside a Claude session.")
-				fmt.Println("Run `remaimber summarize` from a plain shell, or set REMAIMBER_LLM to a")
-				fmt.Println("local OpenAI-compatible endpoint (e.g. http://localhost:1234/v1) for in-session summaries.")
-				return nil
-			}
-
 			database, err := openDB()
 			if err != nil {
 				return err
@@ -942,12 +928,6 @@ func segmentCap() int {
 	return db.DefaultSegmentCap
 }
 
-// summarizeBlockedInSession reports whether summarization must be skipped because
-// the `claude` backend cannot run nested inside a live Claude session/hook.
-func summarizeBlockedInSession(cfg summarizer.Config) bool {
-	return os.Getenv("CLAUDECODE") != "" && !cfg.IsHTTP()
-}
-
 // runBatchSummarize summarizes every session whose user/assistant message count
 // has grown at least minNew beyond its current summary. Active sessions are
 // included on purpose: the rolling summary is offset-based, so checkpointing a
@@ -977,8 +957,9 @@ func runBatchSummarize(ctx context.Context, cfg summarizer.Config, database *sql
 // summarizeIfStaleCmd is the throttled background summary sweep used by hooks.
 // Because SessionEnd is not guaranteed to fire (e.g. a VM killed overnight), this
 // runs opportunistically on reliable, recurring events (SessionStart, Notification)
-// so summaries still get produced. It throttles via a stamp file and self-skips
-// for the `claude` backend inside a session.
+// so summaries still get produced. It throttles via a stamp file. Both backends
+// run from hooks now: the claude backend uses --no-session-persistence, which runs
+// fine inside a session and creates no nested session to recurse through.
 func summarizeIfStaleCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:    "summarize-if-stale",
@@ -986,9 +967,6 @@ func summarizeIfStaleCmd() *cobra.Command {
 		Hidden: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg := summarizer.LoadConfig()
-			if summarizeBlockedInSession(cfg) {
-				return nil // claude backend can't run nested; cron/manual handles it
-			}
 			if !importer.ShouldSummarize() {
 				return nil
 			}
