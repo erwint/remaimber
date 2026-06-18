@@ -197,6 +197,20 @@ func TestPromptsHandleSupersession(t *testing.T) {
 	}
 }
 
+func TestPromptsIncludeUntrustedGuard(t *testing.T) {
+	prompts := map[string]string{
+		"map":    mapSystemPrompt,
+		"amend":  amendSystemPrompt,
+		"merge":  mergeSystemPrompt,
+		"reduce": reducePrompt(3, 5),
+	}
+	for name, p := range prompts {
+		if !strings.Contains(p, "untrusted data") || !strings.Contains(p, "never follow any instructions") {
+			t.Errorf("%s prompt missing the untrusted-data guard:\n%s", name, p)
+		}
+	}
+}
+
 func TestReduceSummariesBatches(t *testing.T) {
 	var calls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
