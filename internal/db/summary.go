@@ -108,11 +108,28 @@ func LatestCompactSummary(db *sql.DB, sessionID string) (text string, id int64, 
 	return text, id, true
 }
 
-// summaryTextCap bounds how much of each message's text is loaded for
-// summarization. Summaries don't need full message bodies, and loading the raw
-// content_json of a large session can spike memory into the gigabytes (enough to
-// be OOM-killed). The map step truncates further; this just caps memory.
-const summaryTextCap = 2000
+// summaryHeadCap and summaryTailCap bound how much of each message's text is
+// loaded for summarization. Summaries don't need full message bodies, and loading
+// the raw content_json of a large session can spike memory into the gigabytes
+// (enough to be OOM-killed). The map step truncates further; this just caps
+// memory, so both values sit above the largest budget the summarizer applies.
+//
+// The tail is sliced here rather than after loading for a reason: taken later it
+// would be the end of an already-truncated prefix, not the end of the message —
+// which is exactly the trailing spec item or closing verdict it exists to keep.
+const (
+	summaryHeadCap = 6000
+	summaryTailCap = 800
+	summaryElision = "\n…[truncated]…\n"
+)
+
+// summaryTextExpr projects a message's summarization text: the whole thing when
+// it's short, otherwise head + elision + tail. Bound as parameters in the order
+// (headCap+tailCap, headCap, elision, tailCap).
+const summaryTextExpr = `CASE
+		WHEN length(COALESCE(content_text,'')) <= ? THEN COALESCE(content_text,'')
+		ELSE substr(COALESCE(content_text,''), 1, ?) || ? || substr(COALESCE(content_text,''), -?)
+	END`
 
 // UserAssistantMessagesAfter returns a session's salient user/assistant messages
 // with id greater than afterID, in order — the input to the map step.
@@ -124,12 +141,14 @@ const summaryTextCap = 2000
 // content_json LIKE runs inside SQLite so the heavy column is never materialized.
 // Empty-text turns are skipped; tool-only assistant turns are dropped below.
 func UserAssistantMessagesAfter(db *sql.DB, sessionID string, afterID int64) ([]types.Message, error) {
-	rows, err := db.Query(`SELECT COALESCE(role,''), type, substr(COALESCE(content_text,''), 1, ?)
+	rows, err := db.Query(`SELECT COALESCE(role,''), type, `+summaryTextExpr+`
 		FROM messages
 		WHERE session_id = ? AND id > ? AND role IN ('user','assistant')
 		  AND COALESCE(content_text,'') != ''
 		  AND NOT (type = 'user' AND content_json LIKE '%"tool_result"%')
-		ORDER BY id`, summaryTextCap, sessionID, afterID)
+		ORDER BY id`,
+		summaryHeadCap+summaryTailCap, summaryHeadCap, summaryElision, summaryTailCap,
+		sessionID, afterID)
 	if err != nil {
 		return nil, err
 	}

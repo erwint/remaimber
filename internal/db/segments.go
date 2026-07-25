@@ -99,14 +99,16 @@ func PlanSegments(content []types.Message, compactionIDs []int64, sizeCap int) [
 // so segment boundaries can be keyed by uuid.
 func SegmentContent(db *sql.DB, sessionID string, afterID int64) ([]types.Message, error) {
 	rows, err := db.Query(`SELECT id, COALESCE(uuid,''), COALESCE(role,''), type,
-			substr(COALESCE(content_text,''), 1, ?)
+			`+summaryTextExpr+`
 		FROM messages
 		WHERE session_id = ? AND id > ? AND role IN ('user','assistant')
 		  AND COALESCE(content_text,'') != ''
 		  AND content_json NOT LIKE '%"isCompactSummary":true%'
 		  AND content_json NOT LIKE '%"isSidechain":true%'
 		  AND NOT (type = 'user' AND content_json LIKE '%"tool_result"%')
-		ORDER BY id`, summaryTextCap, sessionID, afterID)
+		ORDER BY id`,
+		summaryHeadCap+summaryTailCap, summaryHeadCap, summaryElision, summaryTailCap,
+		sessionID, afterID)
 	if err != nil {
 		return nil, err
 	}

@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/erwin/remaimber/internal/types"
 )
@@ -48,6 +49,38 @@ type Config struct {
 	//   "post"             — summarize only post-compaction messages
 	//   "full"             — ignore compaction; map-reduce the whole session
 	CompactMode string
+
+	// Caps bounds per-message text in rendered prompts. Zero value means
+	// DefaultTextCaps.
+	Caps TextCaps
+}
+
+// caps returns the configured budgets, falling back to the defaults so a
+// zero-value Config (tests, direct construction) still renders sensibly.
+func (c Config) caps() TextCaps {
+	if c.Caps.PlainHead <= 0 {
+		return DefaultTextCaps
+	}
+	return c.Caps
+}
+
+// parseCap reads a "head" or "head,tail" budget. Returns ok=false on anything
+// unparseable, so a typo falls back to the default rather than silently
+// truncating every message to nothing.
+func parseCap(s string) (head, tail int, ok bool) {
+	hs, ts, hasTail := strings.Cut(s, ",")
+	h, err := strconv.Atoi(strings.TrimSpace(hs))
+	if err != nil || h <= 0 {
+		return 0, 0, false
+	}
+	if hasTail {
+		t, err := strconv.Atoi(strings.TrimSpace(ts))
+		if err != nil || t < 0 {
+			return 0, 0, false
+		}
+		tail = t
+	}
+	return h, tail, true
 }
 
 // LoadConfig reads configuration from the environment:
@@ -57,6 +90,14 @@ type Config struct {
 //	REMAIMBER_LLM_KEY       optional bearer token for the HTTP backend
 //	REMAIMBER_LLM_TIMEOUT   per-call timeout in seconds (default 300)
 //	REMAIMBER_LLM_WINDOW    messages folded per call (default 40)
+//
+// Per-message text budgets, each "head" or "head,tail" in runes (see TextCaps):
+//
+//	REMAIMBER_CAP_ASSISTANT assistant turns          (default "1200,500")
+//	REMAIMBER_CAP_PLAIN     ordinary user turns      (default "1200")
+//	REMAIMBER_CAP_SPEC      plans / requirement lists (default "5000,800")
+//	REMAIMBER_CAP_LOG       pasted machine output    (default "300"; "off"
+//	                        disables log detection entirely)
 func LoadConfig() Config {
 	c := Config{
 		Backend: os.Getenv("REMAIMBER_LLM"),
@@ -84,6 +125,30 @@ func LoadConfig() Config {
 	c.CompactMode = os.Getenv("REMAIMBER_COMPACT_MODE")
 	if c.CompactMode == "" {
 		c.CompactMode = "anchor"
+	}
+
+	c.Caps = DefaultTextCaps
+	if s := os.Getenv("REMAIMBER_CAP_ASSISTANT"); s != "" {
+		if h, t, ok := parseCap(s); ok {
+			c.Caps.AssistantHead, c.Caps.AssistantTail = h, t
+		}
+	}
+	if s := os.Getenv("REMAIMBER_CAP_PLAIN"); s != "" {
+		if h, _, ok := parseCap(s); ok {
+			c.Caps.PlainHead = h
+		}
+	}
+	if s := os.Getenv("REMAIMBER_CAP_SPEC"); s != "" {
+		if h, t, ok := parseCap(s); ok {
+			c.Caps.SpecHead, c.Caps.SpecTail = h, t
+		}
+	}
+	if s := os.Getenv("REMAIMBER_CAP_LOG"); s != "" {
+		if strings.EqualFold(s, "off") {
+			c.Caps.LogHead = 0
+		} else if h, _, ok := parseCap(s); ok {
+			c.Caps.LogHead = h
+		}
 	}
 	return c
 }
@@ -194,7 +259,7 @@ const mergeSystemPrompt = `Merge these partial summaries of a coding session int
 
 // MapWindow summarizes a single window of messages independently (the map step).
 func (c Config) MapWindow(ctx context.Context, window []types.Message) (string, error) {
-	return c.complete(ctx, mapSystemPrompt, renderWindow(window))
+	return c.complete(ctx, mapSystemPrompt, c.renderWindow(window))
 }
 
 const amendSystemPrompt = `You maintain a concise, recall-optimized summary of ONE segment of a coding ` +
@@ -210,10 +275,10 @@ const amendSystemPrompt = `You maintain a concise, recall-optimized summary of O
 // be empty for a fresh segment). This is the per-segment incremental primitive:
 // because a segment is bounded, a simple fold has no meaningful recency bias.
 func (c Config) Amend(ctx context.Context, prev string, window []types.Message) (string, error) {
-	return c.complete(ctx, amendSystemPrompt, renderAmend(prev, window))
+	return c.complete(ctx, amendSystemPrompt, c.renderAmend(prev, window))
 }
 
-func renderAmend(prev string, window []types.Message) string {
+func (c Config) renderAmend(prev string, window []types.Message) string {
 	var b strings.Builder
 	b.WriteString("Segment summary so far:\n")
 	if strings.TrimSpace(prev) == "" {
@@ -222,7 +287,7 @@ func renderAmend(prev string, window []types.Message) string {
 		b.WriteString(strings.TrimSpace(prev) + "\n")
 	}
 	b.WriteString("\nNew messages (oldest to newest):\n")
-	b.WriteString(renderWindow(window))
+	b.WriteString(c.renderWindow(window))
 	return b.String()
 }
 
@@ -274,21 +339,219 @@ func (c Config) reduceWithTarget(ctx context.Context, goal, prior string, partia
 	return c.reduceWithTarget(ctx, goal, prior, mids, lo, hi)
 }
 
-func renderWindow(window []types.Message) string {
+// TextCaps bounds how much of each message is rendered into a summarization
+// prompt, in runes. Truncation keeps the head and, where a tail budget is set,
+// the end of the message — the middle is what's expendable.
+type TextCaps struct {
+	// Assistant turns lead with the outcome and close with the verdict (test
+	// results, caveats, what was left uncommitted), so both ends carry signal.
+	AssistantHead, AssistantTail int
+	// PlainHead applies to an ordinary long user turn.
+	PlainHead int
+	// LogHead applies to pasted machine output, which states its intent in the
+	// first line and is noise thereafter. Zero disables log detection, so
+	// log-shaped turns fall back to the plain budget.
+	LogHead int
+	// Spec budgets apply to plans and requirement lists, which carry content
+	// right through to the final item.
+	SpecHead, SpecTail int
+}
+
+// DefaultTextCaps is tuned against real archived sessions: assistant turns rarely
+// exceed the head budget, user log pastes lead with their intent, and plans are
+// the one shape where the last line matters as much as the first.
+var DefaultTextCaps = TextCaps{
+	AssistantHead: 1200, AssistantTail: 500,
+	PlainHead: 1200,
+	LogHead:   300,
+	SpecHead:  5000, SpecTail: 800,
+}
+
+var (
+	// tsLine: clock times and ISO/bracketed dates that prefix most log lines.
+	tsLine = regexp.MustCompile(`\d{1,2}:\d{2}:\d{2}|\d{4}-\d{2}-\d{2}|\[\d{1,2}-\w{3}-\d{4}`)
+	// levelLine: severity words emitted by loggers.
+	levelLine = regexp.MustCompile(`\b(DEBUG|INFO|WARN|WARNING|ERROR|TRACE|FATAL)\b`)
+	// srcRefLine: a reference to a source location, which prose essentially never
+	// contains but every stack trace, bundler log and compiler diagnostic does —
+	// file.ext:123, :123:45, "at frame", rustc/cargo/tsc diagnostics and their
+	// "-->" location arrows and "= note:" continuation lines.
+	srcRefLine = regexp.MustCompile(`[\w./-]+\.[A-Za-z]{1,5}:\d+` +
+		`|:\d+:\d+(\s|$)` +
+		`|^\s*at\s+\S+` +
+		`|\bat [\w.$]+\(` +
+		`|^\s*(warning|error|note)(\[[A-Z]\d+\])?:` +
+		`|\berror\s+[A-Z]{2,}\d+:` +
+		`|^\s*-->\s` +
+		`|^\s*\d+\s*\|` +
+		`|^\s*=\s*(note|help):` +
+		// A line that is nothing but a deep absolute path — a "Require stack:"
+		// entry or a resolver dump. Requiring the leading slash and three
+		// segments keeps human file references ("- src/a.go") out of it.
+		`|^\s*[-*+]?\s*/[\w.@-]+(/[\w.@-]+){2,}\s*$`)
+	// boxLine: TUI box-drawing glyphs and raw ANSI escapes — a screen capture.
+	boxLine = regexp.MustCompile("[─-╿▀-▟]|\x1b\\[")
+	// sepLine: a horizontal rule separating table output.
+	sepLine = regexp.MustCompile(`^[\s|+]*[-=_~]{4,}[\s|+\-=_~]*$`)
+	// mdLine: markdown scaffolding. A table row must carry two pipes so rustc's
+	// gutter doesn't read as one.
+	mdLine = regexp.MustCompile(`^\s{0,3}(#{1,6}\s|[-*+]\s|\d+\.\s|\|.*\|)`)
+)
+
+type textShape int
+
+const (
+	shapePlain textShape = iota
+	shapeLog
+	shapeSpec
+)
+
+// isMachineLine reports whether one line looks like program output rather than
+// something a person typed: a timestamp, a log level, a source reference or
+// compiler diagnostic, a terminal box glyph or ANSI escape, or a table rule.
+// Union rather than separate ratios, because a single paste usually mixes several
+// of these and no one of them alone reaches a useful threshold.
+func isMachineLine(ln string) bool {
+	return tsLine.MatchString(ln) || levelLine.MatchString(ln) ||
+		srcRefLine.MatchString(ln) || boxLine.MatchString(ln) || sepLine.MatchString(ln)
+}
+
+// splitLines returns the message's non-blank lines, right-trimmed.
+func splitLines(text string) []string {
+	var lines []string
+	for _, ln := range strings.Split(text, "\n") {
+		if ln = strings.TrimRight(ln, " \t\r"); strings.TrimSpace(ln) != "" {
+			lines = append(lines, ln)
+		}
+	}
+	return lines
+}
+
+// classifyUserText guesses what an over-long user turn is, so renderWindow can
+// budget it. Deliberately cheap, and deliberately asymmetric in what it risks:
+// misreading a log as prose only costs some noise in the prompt, while the
+// reverse silently drops a requirement the session was about.
+//
+// Markdown scaffolding means a plan or spec — checked first, but only when the
+// line noise is low, since a stack trace's "- /path/to/module" lines and rustc's
+// "|" gutter both imitate markdown. Everything else leans on the machine-line
+// ratio, with near-duplicate lines as a backstop for output that carries none of
+// the individual tells (minified stack traces, repeated console warnings).
+func classifyUserText(text string) textShape {
+	lines := splitLines(text)
+	n := len(lines)
+	if n < 4 {
+		return shapePlain
+	}
+
+	var machine, md int
+	prefixes := make(map[string]int, n)
+	for _, ln := range lines {
+		if isMachineLine(ln) {
+			machine++
+		} else if mdLine.MatchString(ln) {
+			// Only non-machine lines can count as structure, so a diagnostic
+			// gutter never reads as a markdown table.
+			md++
+		}
+		r := []rune(ln)
+		if len(r) > 24 {
+			r = r[:24]
+		}
+		prefixes[string(r)]++
+	}
+	var repeated int
+	for _, c := range prefixes {
+		if c > 1 {
+			repeated += c
+		}
+	}
+
+	f := func(count int) float64 { return float64(count) / float64(n) }
+	if f(md) >= 0.30 && f(machine) < 0.25 {
+		return shapeSpec
+	}
+	// The repetition backstop catches output carrying none of the per-line tells —
+	// cargo/linker walls, minified stack traces, repeated console warnings. 0.60 is
+	// measured, not guessed: across an archived corpus the most repetitive genuine
+	// prose reached 0.46, while such pastes sat at 0.69 and above.
+	if f(machine) >= 0.40 || f(repeated) >= 0.60 {
+		return shapeLog
+	}
+	return shapePlain
+}
+
+// leadingProse returns the run of lines before the first machine line, capped at
+// cap runes. A pasted log states its intent in the prose above it ("still
+// crashing:", "the instructions were wrong, the symlink was never updated!") and
+// carries nothing afterwards, so keeping that lead beats keeping the first N
+// characters — which would spend most of the budget on the dump. Empty when the
+// paste starts cold, leaving the caller to fall back to a head cut.
+func leadingProse(text string, cap int) string {
+	var kept []string
+	for _, ln := range splitLines(text) {
+		if isMachineLine(ln) {
+			break
+		}
+		kept = append(kept, ln)
+	}
+	if len(kept) == 0 {
+		return ""
+	}
+	return truncate(strings.Join(kept, "\n"), cap, 0)
+}
+
+// truncate shortens s to head runes, keeping the final tail runes when tail > 0 so
+// a multi-item request doesn't lose its trailing items. Slicing by rune rather
+// than byte keeps the output valid UTF-8.
+func truncate(s string, head, tail int) string {
+	if utf8.RuneCountInString(s) <= head+tail {
+		return s
+	}
+	r := []rune(s)
+	if tail == 0 {
+		return string(r[:head]) + "…"
+	}
+	return string(r[:head]) + "\n…[truncated]…\n" + string(r[len(r)-tail:])
+}
+
+// apply budgets one rendered message by role and, for user turns, by shape.
+func (t TextCaps) apply(role, text string) string {
+	if role != "user" {
+		return truncate(text, t.AssistantHead, t.AssistantTail)
+	}
+	if utf8.RuneCountInString(text) <= t.PlainHead {
+		return text
+	}
+	switch classifyUserText(text) {
+	case shapeLog:
+		if t.LogHead > 0 {
+			// Prefer the prose above the paste; fall back to a head cut when the
+			// dump starts cold and there is no lead to keep.
+			if lead := leadingProse(text, t.LogHead); lead != "" {
+				return lead + "\n…[log elided]…"
+			}
+			return truncate(text, t.LogHead, 0)
+		}
+	case shapeSpec:
+		return truncate(text, t.SpecHead, t.SpecTail)
+	}
+	return truncate(text, t.PlainHead, 0)
+}
+
+func (c Config) renderWindow(window []types.Message) string {
+	caps := c.caps()
 	var b strings.Builder
 	for _, m := range window {
 		text := strings.TrimSpace(m.ContentText)
 		if text == "" {
 			continue
 		}
-		if len(text) > 1200 {
-			text = text[:1200] + "…"
-		}
 		role := m.Role
 		if role == "" {
 			role = m.Type
 		}
-		fmt.Fprintf(&b, "[%s] %s\n", role, text)
+		fmt.Fprintf(&b, "[%s] %s\n", role, caps.apply(role, text))
 	}
 	return b.String()
 }
