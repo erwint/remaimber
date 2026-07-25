@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/erwin/remaimber/internal/types"
 )
@@ -64,7 +65,7 @@ func TestIsHTTP(t *testing.T) {
 }
 
 func TestRenderWindow(t *testing.T) {
-	out := renderWindow([]types.Message{
+	out := Config{}.renderWindow([]types.Message{
 		{Role: "user", ContentText: "add a flag"},
 		{Role: "assistant", ContentText: "done"},
 		{Role: "assistant", ContentText: ""}, // skipped
@@ -74,6 +75,173 @@ func TestRenderWindow(t *testing.T) {
 	}
 	if strings.Contains(out, "[assistant] \n") {
 		t.Error("empty message should be skipped")
+	}
+}
+
+func TestClassifyUserText(t *testing.T) {
+	logText := strings.Repeat("15:05:22.698 [INFO] [kyon_ui_core::core::app] dispatching action\n", 20)
+	spec := "Implement the following plan:\n# ccsetup\n## Context\n- create the manager\n- wire the CLI\n- add tests\n"
+	prose := "the sync keeps dropping events.\nI think the watcher resets on rename.\nCan you check the interval timer?\nIt only happens after a compaction.\n"
+
+	// rustc/clippy: "-->" location arrows and numbered "|" gutters. The gutter
+	// must not read as a markdown table, or this lands in the spec budget.
+	rustc := "still clippy failed:\n" + strings.Repeat(
+		"error: consider using `sort_by_key`\n"+
+			"  --> app/src/ai/agent.rs:412:9\n"+
+			"     |\n"+
+			"412  |         v.sort_by(|a, b| a.k.cmp(&b.k));\n"+
+			"     = note: `-D clippy::pedantic` implied here\n", 12)
+	// A stack trace's "- /path/to/module" lines imitate markdown bullets.
+	requireStack := "⨯ Cannot find module 'dmg-license'\nRequire stack:\n" + strings.Repeat(
+		"- /workspace/app/node_modules/electron-builder/out/index.js\n", 12)
+	// TypeScript diagnostics are full sentences ending in a period, so a naive
+	// "reads like prose" veto would rescue them out of the log budget.
+	tsc := "build fails:\n" + strings.Repeat(
+		"src/test/member-store.test.ts:23:5 - error TS2345: Argument of type "+
+			"'string' is not assignable to parameter of type 'number'.\n", 12)
+	tui := "look at the pane:\n" + strings.Repeat(
+		"┌ editor ──────────────────────────┐\n│ main.rs                     │\n", 12)
+
+	for _, tc := range []struct {
+		name string
+		text string
+		want textShape
+	}{
+		{"log", logText, shapeLog},
+		{"spec", spec, shapeSpec},
+		{"prose", prose, shapePlain},
+		{"prose lead then log", "still crashing:\n" + logText, shapeLog},
+		{"too few lines", "one\ntwo\n", shapePlain},
+		{"rustc diagnostics", rustc, shapeLog},
+		{"require stack imitating bullets", requireStack, shapeLog},
+		{"tsc diagnostics reading as prose", tsc, shapeLog},
+		{"terminal box drawing", tui, shapeLog},
+		{"repetitive build wall", "build broke:\n" + strings.Repeat(
+			"warning: unused variable in crate foo\n", 30), shapeLog},
+	} {
+		if got := classifyUserText(tc.text); got != tc.want {
+			t.Errorf("%s: got shape %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestLeadingProseKeepsIntent(t *testing.T) {
+	dump := strings.Repeat("15:05:22.698 [INFO] dispatching action\n", 200)
+
+	// Multi-line intent above a paste is kept in full, not cut at N chars.
+	got := DefaultTextCaps.apply("user",
+		"this still crashes on startup.\nI reverted the patch and it persists.\n"+
+			"note the resource_limits line near the top:\n"+dump)
+	for _, want := range []string{"this still crashes", "I reverted the patch", "resource_limits line"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("intent line %q dropped:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "dispatching action") {
+		t.Errorf("log body should have been elided:\n%s", got)
+	}
+
+	// A paste that starts cold has no lead; fall back to a head cut.
+	got = DefaultTextCaps.apply("user", dump)
+	if got == "" {
+		t.Error("cold paste rendered empty")
+	}
+	if n := utf8.RuneCountInString(got); n > DefaultTextCaps.LogHead+8 {
+		t.Errorf("cold paste not cut to the log budget: %d runes", n)
+	}
+}
+
+func TestTruncateKeepsBothEnds(t *testing.T) {
+	s := "START" + strings.Repeat("x", 500) + "END"
+	out := truncate(s, 10, 3)
+	if !strings.HasPrefix(out, "START") {
+		t.Errorf("head lost: %q", out)
+	}
+	if !strings.HasSuffix(out, "END") {
+		t.Errorf("tail lost: %q", out)
+	}
+	if !strings.Contains(out, "…[truncated]…") {
+		t.Errorf("elision marker missing: %q", out)
+	}
+
+	// Rune-safe: cutting mid-sequence must not emit invalid UTF-8.
+	if got := truncate(strings.Repeat("ä", 100), 10, 5); !utf8.ValidString(got) {
+		t.Errorf("truncate produced invalid UTF-8: %q", got)
+	}
+	if got := truncate("short", 100, 10); got != "short" {
+		t.Errorf("under-cap text should pass through, got %q", got)
+	}
+}
+
+func TestTextCapsApply(t *testing.T) {
+	// A log keeps its intent lead and drops the dump.
+	log := "still crashing:\n" + strings.Repeat("15:05:22.698 [INFO] dispatching action\n", 200)
+	got := DefaultTextCaps.apply("user", log)
+	if !strings.HasPrefix(got, "still crashing:") {
+		t.Errorf("log lost its intent lead: %q", got[:40])
+	}
+	if utf8.RuneCountInString(got) > DefaultTextCaps.LogHead+8 {
+		t.Errorf("log not cut to log budget: %d runes", utf8.RuneCountInString(got))
+	}
+
+	// A spec keeps far more, including its final item.
+	spec := "Implement the following plan:\n" + strings.Repeat("- do a thing\n", 300) + "- LAST ITEM\n"
+	got = DefaultTextCaps.apply("user", spec)
+	if utf8.RuneCountInString(got) <= DefaultTextCaps.PlainHead {
+		t.Errorf("spec squeezed into the plain budget: %d runes", utf8.RuneCountInString(got))
+	}
+	if !strings.Contains(got, "LAST ITEM") {
+		t.Error("spec lost its trailing item")
+	}
+
+	// An assistant turn keeps its closing verdict.
+	asst := "Done. Rewrote the loader.\n" + strings.Repeat("detail line\n", 300) + "15 tests pass; -check is clean."
+	got = DefaultTextCaps.apply("assistant", asst)
+	if !strings.HasPrefix(got, "Done. Rewrote the loader.") {
+		t.Errorf("assistant lost its outcome lead: %q", got[:40])
+	}
+	if !strings.Contains(got, "15 tests pass") {
+		t.Error("assistant lost its closing verdict")
+	}
+}
+
+func TestTextCapConfig(t *testing.T) {
+	for _, k := range []string{"REMAIMBER_CAP_ASSISTANT", "REMAIMBER_CAP_PLAIN", "REMAIMBER_CAP_SPEC", "REMAIMBER_CAP_LOG"} {
+		t.Setenv(k, "")
+	}
+	if got := LoadConfig().caps(); got != DefaultTextCaps {
+		t.Errorf("unset env should give defaults, got %+v", got)
+	}
+
+	t.Setenv("REMAIMBER_CAP_ASSISTANT", "900,250")
+	t.Setenv("REMAIMBER_CAP_PLAIN", "2000")
+	t.Setenv("REMAIMBER_CAP_SPEC", "8000, 1500")
+	c := LoadConfig().caps()
+	if c.AssistantHead != 900 || c.AssistantTail != 250 {
+		t.Errorf("assistant cap = %d,%d want 900,250", c.AssistantHead, c.AssistantTail)
+	}
+	if c.PlainHead != 2000 {
+		t.Errorf("plain cap = %d want 2000", c.PlainHead)
+	}
+	if c.SpecHead != 8000 || c.SpecTail != 1500 {
+		t.Errorf("spec cap = %d,%d want 8000,1500 (spaces tolerated)", c.SpecHead, c.SpecTail)
+	}
+
+	// "off" disables log detection: a log-shaped turn gets the plain budget.
+	t.Setenv("REMAIMBER_CAP_LOG", "off")
+	caps := LoadConfig().caps()
+	if caps.LogHead != 0 {
+		t.Errorf("LOG=off should zero the log cap, got %d", caps.LogHead)
+	}
+	logText := "still crashing:\n" + strings.Repeat("15:05:22.698 [INFO] dispatching\n", 200)
+	if n := utf8.RuneCountInString(caps.apply("user", logText)); n <= caps.PlainHead-1 {
+		t.Errorf("LOG=off should fall back to the plain budget, got %d runes", n)
+	}
+
+	// Garbage falls back to the default rather than truncating to nothing.
+	t.Setenv("REMAIMBER_CAP_PLAIN", "not-a-number")
+	if got := LoadConfig().caps().PlainHead; got != DefaultTextCaps.PlainHead {
+		t.Errorf("invalid cap = %d, want default %d", got, DefaultTextCaps.PlainHead)
 	}
 }
 
@@ -117,14 +285,14 @@ func TestStripEphemeral(t *testing.T) {
 }
 
 func TestRenderAmend(t *testing.T) {
-	out := renderAmend("segment so far", []types.Message{{Role: "user", ContentText: "next thing"}})
+	out := Config{}.renderAmend("segment so far", []types.Message{{Role: "user", ContentText: "next thing"}})
 	if !strings.Contains(out, "Segment summary so far:\nsegment so far") {
 		t.Errorf("amend prompt missing prior segment summary:\n%s", out)
 	}
 	if !strings.Contains(out, "[user] next thing") {
 		t.Errorf("amend prompt missing new messages:\n%s", out)
 	}
-	if !strings.Contains(renderAmend("", nil), "none yet") {
+	if !strings.Contains(Config{}.renderAmend("", nil), "none yet") {
 		t.Error("empty prior should render as none yet")
 	}
 }
