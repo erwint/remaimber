@@ -61,21 +61,22 @@ func seedSegmented(t *testing.T) *sql.DB {
 		role string
 		text string
 		json string
+		ts   string
 	}{
-		{0, "user", "add oauth login support", `{"type":"user"}`},
-		{0, "assistant", "Wired up the oauth flow.", `{"type":"assistant"}`},
-		{1, "user", "now set up the mail-relay on the nas", `{"type":"user"}`},
-		{1, "assistant", "[tool: Bash]", `{"type":"assistant"}`}, // tool-only, excluded
-		{2, "user", "the mail-relay still refuses the handshake", `{"type":"user"}`},
-		{2, "assistant", "Fixed the mail-relay TLS config.", `{"type":"assistant"}`},
-		{2, "user", "total 8\n-rw-r--r-- x", `{"type":"user","message":{"content":[{"type":"tool_result"}]}}`},
+		{0, "user", "add oauth login support", `{"type":"user"}`, "2026-08-06T09:00:00Z"},
+		{0, "assistant", "Wired up the oauth flow.", `{"type":"assistant"}`, "2026-08-06T09:05:00Z"},
+		{1, "user", "now set up the mail-relay on the nas", `{"type":"user"}`, "2026-08-06T11:20:00Z"},
+		{1, "assistant", "[tool: Bash]", `{"type":"assistant"}`, "2026-08-06T11:25:00Z"}, // tool-only, excluded
+		{2, "user", "the mail-relay still refuses the handshake", `{"type":"user"}`, "2026-08-06T13:00:00Z"},
+		{2, "assistant", "Fixed the mail-relay TLS config.", `{"type":"assistant"}`, "2026-08-06T13:10:00Z"},
+		{2, "user", "total 8\n-rw-r--r-- x", `{"type":"user","message":{"content":[{"type":"tool_result"}]}}`, "2026-08-06T13:20:00Z"},
 	}
 	tx, _ := database.Begin()
 	for i, m := range texts {
 		typ := m.role
 		if err := InsertMessage(tx, &types.Message{
 			SessionID: "s", UUID: string(rune('a' + i)), Type: typ, Role: m.role,
-			ContentText: m.text, ContentJSON: m.json,
+			ContentText: m.text, ContentJSON: m.json, Timestamp: m.ts,
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -109,7 +110,7 @@ func TestSegmentsMatchingRanksByHits(t *testing.T) {
 	database := seedSegmented(t)
 
 	// Hyphenated term: only works because the FTS fallback quotes it.
-	got, err := SegmentsMatching(database, "s", "mail-relay")
+	got, err := SegmentsMatching(database, "s", "mail-relay", "", "")
 	if err != nil {
 		t.Fatalf("SegmentsMatching: %v", err)
 	}
@@ -127,7 +128,7 @@ func TestSegmentsMatchingRanksByHits(t *testing.T) {
 	}
 
 	// A topic confined to one segment must not drag in the others.
-	got, err = SegmentsMatching(database, "s", "oauth")
+	got, err = SegmentsMatching(database, "s", "oauth", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +136,7 @@ func TestSegmentsMatchingRanksByHits(t *testing.T) {
 		t.Errorf("oauth matched %v, want only segment 0", got)
 	}
 
-	if got, _ = SegmentsMatching(database, "s", "kubernetes"); len(got) != 0 {
+	if got, _ = SegmentsMatching(database, "s", "kubernetes", "", ""); len(got) != 0 {
 		t.Errorf("unrelated term matched %d segments, want 0", len(got))
 	}
 }
@@ -143,7 +144,7 @@ func TestSegmentsMatchingRanksByHits(t *testing.T) {
 func TestSegmentMessagesFiltersAndScopes(t *testing.T) {
 	database := seedSegmented(t)
 
-	msgs, err := SegmentMessages(database, "s", []int{2})
+	msgs, err := SegmentMessages(database, "s", []int{2}, "", "")
 	if err != nil {
 		t.Fatalf("SegmentMessages: %v", err)
 	}
@@ -158,13 +159,13 @@ func TestSegmentMessagesFiltersAndScopes(t *testing.T) {
 	}
 
 	// Tool-only assistant turns are dropped, so segment 1 yields just the prompt.
-	msgs, _ = SegmentMessages(database, "s", []int{1})
+	msgs, _ = SegmentMessages(database, "s", []int{1}, "", "")
 	if len(msgs) != 1 || msgs[0].Role != "user" {
 		t.Errorf("segment 1 = %+v, want only the user turn", msgs)
 	}
 
 	// Multiple segments come back in conversation order, not selection order.
-	msgs, _ = SegmentMessages(database, "s", []int{2, 0})
+	msgs, _ = SegmentMessages(database, "s", []int{2, 0}, "", "")
 	if len(msgs) < 2 {
 		t.Fatalf("multi-segment select returned %d messages", len(msgs))
 	}
@@ -175,7 +176,73 @@ func TestSegmentMessagesFiltersAndScopes(t *testing.T) {
 		}
 	}
 
-	if msgs, _ = SegmentMessages(database, "s", nil); msgs != nil {
+	if msgs, _ = SegmentMessages(database, "s", nil, "", ""); msgs != nil {
 		t.Error("empty selection should return nothing")
+	}
+}
+
+func TestSegmentTimesAndWindow(t *testing.T) {
+	database := seedSegmented(t)
+
+	times, err := SegmentTimes(database, "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := times[1]; got[0] != "2026-08-06T11:20:00Z" || got[1] != "2026-08-06T11:25:00Z" {
+		t.Errorf("segment 1 span = %v, want the 11:20–11:25 range", got)
+	}
+
+	// A window inside a segment must still select it (overlap, not containment):
+	// this is the common case, a half hour inside a segment spanning hours.
+	sel, err := SegmentsInWindow(database, "s", "2026-08-06T11:21", "2026-08-06T11:24")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(sel, []int{1}) {
+		t.Errorf("window inside segment 1 selected %v, want [1]", sel)
+	}
+
+	// Open-ended windows.
+	if sel, _ = SegmentsInWindow(database, "s", "2026-08-06T12:00", ""); !reflect.DeepEqual(sel, []int{2}) {
+		t.Errorf("open-ended since selected %v, want [2]", sel)
+	}
+	if sel, _ = SegmentsInWindow(database, "s", "", "2026-08-06T10:00"); !reflect.DeepEqual(sel, []int{0}) {
+		t.Errorf("open-ended until selected %v, want [0]", sel)
+	}
+	if sel, _ = SegmentsInWindow(database, "s", "2027-01-01", ""); len(sel) != 0 {
+		t.Errorf("window past the end selected %v, want nothing", sel)
+	}
+}
+
+// A window narrows *within* a segment, which is the whole point: selecting the
+// segment finds the sitting, the window finds the part of it that matters.
+func TestSegmentMessagesHonoursWindow(t *testing.T) {
+	database := seedSegmented(t)
+
+	msgs, err := SegmentMessages(database, "s", []int{2}, "", "2026-08-06T13:05")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 || msgs[0].Role != "user" {
+		t.Fatalf("windowed segment 2 = %+v, want just the 13:00 user turn", msgs)
+	}
+
+	// The same selection unwindowed returns more, proving the cut was the window.
+	all, _ := SegmentMessages(database, "s", []int{2}, "", "")
+	if len(all) <= len(msgs) {
+		t.Errorf("window did not narrow: %d vs %d", len(msgs), len(all))
+	}
+}
+
+// A match plus a window must intersect, not pick whichever is broader.
+func TestSegmentsMatchingHonoursWindow(t *testing.T) {
+	database := seedSegmented(t)
+
+	got, err := SegmentsMatching(database, "s", "mail-relay", "", "2026-08-06T12:00")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Seq != 1 {
+		t.Errorf("match+window = %v, want only segment 1 (segment 2 is after the window)", got)
 	}
 }

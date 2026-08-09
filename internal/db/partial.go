@@ -18,6 +18,11 @@ type SegmentHit struct {
 	Segment
 	Hits      int    `json:"hits"`
 	FirstSeen string `json:"first_seen,omitempty"` // timestamp of the earliest hit
+	// StartedAt/EndedAt bound the whole segment in time. A segment can span
+	// hours, so this is often how someone recognises the part they meant —
+	// and what a time window is matched against.
+	StartedAt string `json:"started_at,omitempty"`
+	EndedAt   string `json:"ended_at,omitempty"`
 }
 
 // segmentRange matches a message id to its segment. An open segment has no
@@ -33,18 +38,20 @@ const segmentRange = `g.session_id = m.session_id
 // A session that has never been summarized has no segments and yields nothing;
 // callers should fall back to the whole session rather than treating that as "no
 // match".
-func SegmentsMatching(db *sql.DB, sessionID, query string) ([]SegmentHit, error) {
-	hits, err := segmentsMatching(db, sessionID, query)
+// since and until, when non-empty, restrict which hits count — so a term that
+// recurs across a long session can be pinned to the sitting it was worked on in.
+func SegmentsMatching(db *sql.DB, sessionID, query, since, until string) ([]SegmentHit, error) {
+	hits, err := segmentsMatching(db, sessionID, query, since, until)
 	if err == nil || !isFTSParseError(err) {
 		return hits, err
 	}
 	if quoted := QuoteFTSQuery(query); quoted != "" && quoted != query {
-		return segmentsMatching(db, sessionID, quoted)
+		return segmentsMatching(db, sessionID, quoted, since, until)
 	}
 	return hits, err
 }
 
-func segmentsMatching(db *sql.DB, sessionID, match string) ([]SegmentHit, error) {
+func segmentsMatching(db *sql.DB, sessionID, match, since, until string) ([]SegmentHit, error) {
 	rows, err := db.Query(`
 		SELECT g.seq, g.start_id, COALESCE(g.end_id,0), COALESCE(g.summary,''),
 			g.msg_count, g.closed, COALESCE(g.reason,''),
@@ -53,8 +60,9 @@ func segmentsMatching(db *sql.DB, sessionID, match string) ([]SegmentHit, error)
 		JOIN messages m ON m.id = messages_fts.rowid
 		JOIN session_segments g ON `+segmentRange+`
 		WHERE messages_fts MATCH ? AND m.session_id = ?
+		  AND (? = '' OR m.timestamp >= ?) AND (? = '' OR m.timestamp <= ?)
 		GROUP BY g.seq
-		ORDER BY hits DESC, g.seq`, match, sessionID)
+		ORDER BY hits DESC, g.seq`, match, sessionID, since, since, until, until)
 	if err != nil {
 		return nil, err
 	}
@@ -74,6 +82,54 @@ func segmentsMatching(db *sql.DB, sessionID, match string) ([]SegmentHit, error)
 	return out, rows.Err()
 }
 
+// SegmentTimes returns each segment's first and last message timestamp. The
+// segment table stores id ranges, not times, so this is derived on demand.
+func SegmentTimes(db *sql.DB, sessionID string) (map[int][2]string, error) {
+	rows, err := db.Query(`
+		SELECT g.seq, COALESCE(MIN(m.timestamp),''), COALESCE(MAX(m.timestamp),'')
+		FROM messages m
+		JOIN session_segments g ON `+segmentRange+`
+		WHERE m.session_id = ? GROUP BY g.seq`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int][2]string{}
+	for rows.Next() {
+		var seq int
+		var lo, hi string
+		if err := rows.Scan(&seq, &lo, &hi); err != nil {
+			return nil, err
+		}
+		out[seq] = [2]string{lo, hi}
+	}
+	return out, rows.Err()
+}
+
+// SegmentsInWindow returns the segments overlapping a time range, for locating a
+// part of a conversation by when it happened rather than by what it said. Either
+// bound may be empty for an open-ended window.
+func SegmentsInWindow(db *sql.DB, sessionID, since, until string) ([]int, error) {
+	times, err := SegmentTimes(db, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	var out []int
+	for seq, span := range times {
+		// Overlap, not containment: a window inside one long segment must still
+		// select it, which is the common case.
+		if since != "" && span[1] != "" && span[1] < since {
+			continue
+		}
+		if until != "" && span[0] != "" && span[0] > until {
+			continue
+		}
+		out = append(out, seq)
+	}
+	sort.Ints(out)
+	return out, nil
+}
+
 // SegmentMessages returns the salient messages inside the given segments of a
 // session, in conversation order. Applies the same filtering the summarizer uses
 // — no tool results, no compaction markers, no sidechains — because the point is
@@ -82,7 +138,10 @@ func segmentsMatching(db *sql.DB, sessionID, match string) ([]SegmentHit, error)
 // Unlike the summarizer's loader this does not truncate: a partial resume is
 // meant to be read as context, and the whole reason for selecting segments is
 // that the caller can now afford the full text of the part that matters.
-func SegmentMessages(db *sql.DB, sessionID string, seqs []int) ([]types.Message, error) {
+// since and until further bound the result in time, which matters because a
+// single segment can span hours: selecting the segment finds the sitting, the
+// window finds the half hour within it.
+func SegmentMessages(db *sql.DB, sessionID string, seqs []int, since, until string) ([]types.Message, error) {
 	if len(seqs) == 0 {
 		return nil, nil
 	}
@@ -92,7 +151,7 @@ func SegmentMessages(db *sql.DB, sessionID string, seqs []int) ([]types.Message,
 		ph[i] = "?"
 		args = append(args, s)
 	}
-	args = append(args, sessionID)
+	args = append(args, sessionID, since, since, until, until)
 
 	rows, err := db.Query(`
 		SELECT m.id, COALESCE(m.uuid,''), COALESCE(m.role,''), m.type,
@@ -106,6 +165,7 @@ func SegmentMessages(db *sql.DB, sessionID string, seqs []int) ([]types.Message,
 		  AND m.content_json NOT LIKE '%"isCompactSummary":true%'
 		  AND m.content_json NOT LIKE '%"isSidechain":true%'
 		  AND NOT (m.type = 'user' AND m.content_json LIKE '%"tool_result"%')
+		  AND (? = '' OR m.timestamp >= ?) AND (? = '' OR m.timestamp <= ?)
 		ORDER BY m.id`, args...)
 	if err != nil {
 		return nil, err

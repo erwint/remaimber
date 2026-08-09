@@ -701,7 +701,7 @@ func moveCmd() *cobra.Command {
 // candidates; with a session id it prepares that session for resume.
 func resumeCmd() *cobra.Command {
 	var subpathOnly bool
-	var match, segSpec string
+	var match, segSpec, since, until string
 	var printMsgs bool
 	var contextPad, maxSegs int
 	cmd := &cobra.Command{
@@ -728,13 +728,13 @@ func resumeCmd() *cobra.Command {
 			defer database.Close()
 
 			if len(args) == 1 {
-				if match != "" || segSpec != "" {
+				if match != "" || segSpec != "" || since != "" || until != "" {
 					return partialResume(database, args[0], cwd, gi,
-						match, segSpec, printMsgs, contextPad, maxSegs)
+						match, segSpec, since, until, printMsgs, contextPad, maxSegs)
 				}
 				return prepareResume(database, args[0], cwd, gi)
 			}
-			if match != "" || segSpec != "" {
+			if match != "" || segSpec != "" || since != "" || until != "" {
 				return fmt.Errorf("--match/--segments need a session id: remaimber resume <session-id> --match <topic>")
 			}
 
@@ -776,6 +776,8 @@ func resumeCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&printMsgs, "print", false, "Print the selected segments' messages instead of just their summaries")
 	cmd.Flags().IntVar(&contextPad, "context", 0, "Include this many neighbouring segments on each side")
 	cmd.Flags().IntVar(&maxSegs, "max-segments", 3, "Cap on how many matched segments to select")
+	cmd.Flags().StringVar(&since, "since", "", "Only this time window (ISO 8601, e.g. 2026-08-06T11:18)")
+	cmd.Flags().StringVar(&until, "until", "", "End of the time window (ISO 8601)")
 	return cmd
 }
 
@@ -783,7 +785,7 @@ func resumeCmd() *cobra.Command {
 // topic. The session is still linked into this worktree, so a native full resume
 // stays available — narrowing is about what gets read back, not what is reachable.
 func partialResume(database *sql.DB, prefix, cwd string, gi *gitinfo.Identity,
-	match, segSpec string, printMsgs bool, contextPad, maxSegs int) error {
+	match, segSpec, since, until string, printMsgs bool, contextPad, maxSegs int) error {
 	sessionID, err := db.ResolveSessionID(database, prefix)
 	if err != nil {
 		return err
@@ -796,11 +798,15 @@ func partialResume(database *sql.DB, prefix, cwd string, gi *gitinfo.Identity,
 		return fmt.Errorf("session %s has no segments yet (not summarized)\nrun: remaimber summarize %s",
 			shortID(sessionID), shortID(sessionID))
 	}
-	sel, hits, err := selectSegments(database, sessionID, all, match, segSpec, maxSegs)
+	sel, hits, err := selectSegments(database, sessionID, all, match, segSpec, since, until, maxSegs)
 	if err != nil {
 		return err
 	}
 	sel = db.WithNeighbours(sel, contextPad, all[len(all)-1].Seq)
+	times, err := db.SegmentTimes(database, sessionID)
+	if err != nil {
+		return err
+	}
 
 	var total, picked int
 	for _, s := range all {
@@ -822,22 +828,38 @@ func partialResume(database *sql.DB, prefix, cwd string, gi *gitinfo.Identity,
 		return err
 	}
 
+	// A time window cuts inside the selected segments, so the segment message
+	// counts would overstate what actually comes back. Count the real rows.
+	window := ""
+	if since != "" || until != "" {
+		msgs, err := db.SegmentMessages(database, sessionID, sel, since, until)
+		if err != nil {
+			return err
+		}
+		picked = len(msgs)
+		window = fmt.Sprintf(", windowed to %s", strings.TrimSpace(since+" – "+until))
+	}
+
 	fmt.Printf("Session %s — %d segments, %d messages\n", shortID(sessionID), len(all), total)
-	fmt.Printf("Selected %s: %d messages (%.0f%% of the session)\n\n",
-		formatSeqs(sel), picked, 100*float64(picked)/float64(max(total, 1)))
+	fmt.Printf("Selected %s%s: %d messages (%.0f%% of the session)\n\n",
+		formatSeqs(sel), window, picked, 100*float64(picked)/float64(max(total, 1)))
 	for _, q := range sel {
 		s := bySeq[q]
 		hint := ""
 		if h := hits[q]; h > 0 {
-			hint = fmt.Sprintf("  [%d hits]", h)
+			hint = fmt.Sprintf(" [%d hits]", h)
 		}
-		fmt.Printf("  [%d]%s %s\n", q, hint, truncate(strings.ReplaceAll(s.Summary, "\n", " "), 100))
+		fmt.Printf("  [%d]%s %s\n      %s\n", q, hint, formatSpan(times[q]),
+			truncate(strings.ReplaceAll(s.Summary, "\n", " "), 96))
 	}
 
 	if printMsgs {
-		msgs, err := db.SegmentMessages(database, sessionID, sel)
+		msgs, err := db.SegmentMessages(database, sessionID, sel, since, until)
 		if err != nil {
 			return err
+		}
+		if len(msgs) == 0 {
+			return fmt.Errorf("no messages in that selection")
 		}
 		fmt.Printf("\n%s\n\n", strings.Repeat("─", 72))
 		for _, m := range msgs {
@@ -846,12 +868,40 @@ func partialResume(database *sql.DB, prefix, cwd string, gi *gitinfo.Identity,
 		return nil
 	}
 
+	win := ""
+	if since != "" {
+		win += " --since " + since
+	}
+	if until != "" {
+		win += " --until " + until
+	}
 	fmt.Printf("\nLoad this slice here:  ask Claude to \"continue session %s segments %s\"\n",
 		shortID(sessionID), formatSeqs(sel))
-	fmt.Printf("Print the messages:    remaimber resume %s --segments %s --print\n",
-		shortID(sessionID), formatSeqs(sel))
+	fmt.Printf("Print the messages:    remaimber resume %s --segments %s%s --print\n",
+		shortID(sessionID), formatSeqs(sel), win)
 	fmt.Printf("Full session instead:  claude --resume %s\n", sessionID)
 	return nil
+}
+
+// formatSpan renders a segment's time range compactly: the date once, then both
+// clock times, since a segment almost always sits inside one day.
+func formatSpan(span [2]string) string {
+	lo, hi := span[0], span[1]
+	if lo == "" || hi == "" {
+		return ""
+	}
+	day, from, okA := strings.Cut(lo, "T")
+	_, to, okB := strings.Cut(hi, "T")
+	if !okA || !okB {
+		return lo + "…" + hi
+	}
+	clip := func(s string) string {
+		if len(s) >= 5 {
+			return s[:5]
+		}
+		return s
+	}
+	return fmt.Sprintf("%s %s–%s", day, clip(from), clip(to))
 }
 
 // formatSeqs renders segment numbers compactly, collapsing runs into ranges
@@ -924,7 +974,7 @@ func prepareResume(database *sql.DB, prefix, cwd string, gi *gitinfo.Identity) e
 // counts. A match that finds nothing is an error rather than a silent fall back
 // to everything, since quietly loading a 1200-message session when the caller
 // asked for one topic is the opposite of what they wanted.
-func selectSegments(database *sql.DB, sessionID string, all []db.Segment, match, spec string, maxSegments int) ([]int, map[int]int, error) {
+func selectSegments(database *sql.DB, sessionID string, all []db.Segment, match, spec, since, until string, maxSegments int) ([]int, map[int]int, error) {
 	hits := map[int]int{}
 
 	if spec != "" {
@@ -946,6 +996,17 @@ func selectSegments(database *sql.DB, sessionID string, all []db.Segment, match,
 	}
 
 	if match == "" {
+		// A bare time window selects by when rather than by what.
+		if since != "" || until != "" {
+			sel, err := db.SegmentsInWindow(database, sessionID, since, until)
+			if err != nil {
+				return nil, nil, err
+			}
+			if len(sel) == 0 {
+				return nil, nil, fmt.Errorf("no segment of %s falls in that time window", shortID(sessionID))
+			}
+			return sel, hits, nil
+		}
 		sel := make([]int, len(all))
 		for i, s := range all {
 			sel[i] = s.Seq
@@ -953,12 +1014,16 @@ func selectSegments(database *sql.DB, sessionID string, all []db.Segment, match,
 		return sel, hits, nil
 	}
 
-	matched, err := db.SegmentsMatching(database, sessionID, match)
+	matched, err := db.SegmentsMatching(database, sessionID, match, since, until)
 	if err != nil {
 		return nil, nil, err
 	}
 	if len(matched) == 0 {
-		return nil, nil, fmt.Errorf("no segment of %s matches %q", shortID(sessionID), match)
+		where := ""
+		if since != "" || until != "" {
+			where = " in that time window"
+		}
+		return nil, nil, fmt.Errorf("no segment of %s matches %q%s", shortID(sessionID), match, where)
 	}
 	// Drop incidental mentions. A topic discussed across a session concentrates
 	// its hits in a couple of segments; a segment holding a small fraction of the
@@ -1429,6 +1494,8 @@ func runMCP() error {
 		mcp.WithBoolean("include_messages", mcp.Description("Include the full messages of the selected segments, not just summaries (default false)")),
 		mcp.WithNumber("context", mcp.Description("Also include this many neighbouring segments on each side (default 0)")),
 		mcp.WithNumber("max_segments", mcp.Description("Cap on how many matched segments to select (default 3)")),
+		mcp.WithString("since", mcp.Description("Restrict to a time window (ISO 8601). A segment can span hours, so this narrows within one; usable alone to select purely by when.")),
+		mcp.WithString("until", mcp.Description("End of the time window (ISO 8601)")),
 	)
 	s.AddTool(getSegmentsTool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		prefix, _ := req.RequireString("session_id")
@@ -1447,12 +1514,18 @@ func runMCP() error {
 		}
 		maxSeq := all[len(all)-1].Seq
 
+		since, until := req.GetString("since", ""), req.GetString("until", "")
 		sel, hits, err := selectSegments(database, sessionID, all,
-			req.GetString("match", ""), req.GetString("segments", ""), req.GetInt("max_segments", 3))
+			req.GetString("match", ""), req.GetString("segments", ""), since, until,
+			req.GetInt("max_segments", 3))
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 		sel = db.WithNeighbours(sel, req.GetInt("context", 0), maxSeq)
+		times, err := db.SegmentTimes(database, sessionID)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
 
 		out := struct {
 			SessionID     string          `json:"session_id"`
@@ -1469,12 +1542,14 @@ func runMCP() error {
 		for _, s := range all {
 			for _, want := range sel {
 				if s.Seq == want {
-					out.Segments = append(out.Segments, db.SegmentHit{Segment: s, Hits: hits[s.Seq]})
+					span := times[s.Seq]
+					out.Segments = append(out.Segments, db.SegmentHit{
+						Segment: s, Hits: hits[s.Seq], StartedAt: span[0], EndedAt: span[1]})
 				}
 			}
 		}
 		if req.GetBool("include_messages", false) {
-			if out.Messages, err = db.SegmentMessages(database, sessionID, sel); err != nil {
+			if out.Messages, err = db.SegmentMessages(database, sessionID, sel, since, until); err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
 		} else {
