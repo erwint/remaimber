@@ -16,6 +16,9 @@ import (
 // segment can hold five hours across several unrelated topics. A passage is
 // derived from where the matching messages actually fall.
 type Passage struct {
+	// SessionID names the conversation. Always set, so a passage stays
+	// self-describing when results from several conversations are ranked together.
+	SessionID string  `json:"session_id"`
 	StartID   int64   `json:"start_id"`
 	EndID     int64   `json:"end_id"`
 	StartedAt string  `json:"started_at,omitempty"`
@@ -103,6 +106,40 @@ func QueryTerms(q string) []string {
 // "mail relay nas", because it simply contained more weak mentions. Coverage is
 // what separates a passage about the topic from one that name-drops a word of it.
 func FindPassages(db *sql.DB, sessionID, query string, opts PassageOpts) ([]Passage, error) {
+	return findPassages(db, query, PassageFilter{SessionID: sessionID}, opts)
+}
+
+// PassageFilter narrows which conversations are searched. The zero value searches
+// the whole archive.
+type PassageFilter struct {
+	SessionID string // one session; empty searches all
+	// ExcludeSession drops one conversation from the results — normally the
+	// live one, since a session that is currently discussing a topic would
+	// otherwise outrank the older conversation where the work was done.
+	ExcludeSession string
+	Project        string // substring match on project key
+	Repo           string // exact repo identity, across worktrees
+	Subpath        string // exact monorepo subpath
+	Since          string // ISO 8601 bounds on message timestamps
+	Until          string
+}
+
+// FindPassagesAcross locates the stretches of *any* archived conversation that
+// are about a topic, best first. This is the entry point for "find the part where
+// we did X" when which conversation it was in is exactly what has been forgotten.
+//
+// Ranking is global: passages from different sessions compete directly, so a
+// short, dense discussion in one conversation outranks a passing mention in
+// another. Candidates default higher than the single-session case, because the
+// budget is now shared across every conversation in the archive.
+func FindPassagesAcross(db *sql.DB, query string, f PassageFilter, opts PassageOpts) ([]Passage, error) {
+	if opts.Candidates <= 0 {
+		opts.Candidates = 400
+	}
+	return findPassages(db, query, f, opts)
+}
+
+func findPassages(db *sql.DB, query string, f PassageFilter, opts PassageOpts) ([]Passage, error) {
 	opts = opts.withDefaults()
 	terms := QueryTerms(query)
 	if len(terms) == 0 {
@@ -113,58 +150,103 @@ func FindPassages(db *sql.DB, sessionID, query string, opts PassageOpts) ([]Pass
 		quoted[i] = `"` + strings.ReplaceAll(t, `"`, "") + `"`
 	}
 
-	rows, err := db.Query(`
-		SELECT m.id, COALESCE(m.timestamp,''), bm25(messages_fts),
+	q := `
+		SELECT m.session_id, m.id, COALESCE(m.timestamp,''), bm25(messages_fts),
 			lower(substr(COALESCE(m.content_text,''),1,4000)),
 			substr(COALESCE(m.content_text,''),1,160)
 		FROM messages_fts
-		JOIN messages m ON m.id = messages_fts.rowid
-		WHERE messages_fts MATCH ? AND m.session_id = ?
-		  AND m.content_json NOT LIKE '%"isSidechain":true%'
-		ORDER BY bm25(messages_fts)
-		LIMIT ?`, strings.Join(quoted, " OR "), sessionID, opts.Candidates)
+		JOIN messages m ON m.id = messages_fts.rowid`
+	if f.Project != "" || f.Repo != "" || f.Subpath != "" {
+		q += `
+		JOIN sessions s ON s.session_id = m.session_id
+		LEFT JOIN session_identity si ON si.session_id = m.session_id`
+	}
+	q += `
+		WHERE messages_fts MATCH ?
+		  AND m.content_json NOT LIKE '%"isSidechain":true%'`
+	args := []any{strings.Join(quoted, " OR ")}
+	if f.SessionID != "" {
+		q += ` AND m.session_id = ?`
+		args = append(args, f.SessionID)
+	}
+	if f.ExcludeSession != "" {
+		q += ` AND m.session_id != ?`
+		args = append(args, f.ExcludeSession)
+	}
+	if f.Project != "" {
+		q += ` AND s.project_key LIKE ?`
+		args = append(args, "%"+f.Project+"%")
+	}
+	if f.Repo != "" {
+		q += ` AND si.repo_id = ?`
+		args = append(args, f.Repo)
+	}
+	if f.Subpath != "" {
+		q += ` AND si.subpath = ?`
+		args = append(args, f.Subpath)
+	}
+	if f.Since != "" {
+		q += ` AND m.timestamp >= ?`
+		args = append(args, f.Since)
+	}
+	if f.Until != "" {
+		q += ` AND m.timestamp <= ?`
+		args = append(args, f.Until)
+	}
+	q += ` ORDER BY bm25(messages_fts) LIMIT ?`
+	args = append(args, opts.Candidates)
+
+	rows, err := db.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
 	type hit struct {
+		session string
 		id      int64
 		ts      string
 		score   float64 // bm25 is negative; kept negated so bigger is better
 		body    string
 		snippet string
 	}
-	var hits []hit
+	bySession := map[string][]hit{}
+	var order []string
 	for rows.Next() {
 		var h hit
 		var bm float64
-		if err := rows.Scan(&h.id, &h.ts, &bm, &h.body, &h.snippet); err != nil {
+		if err := rows.Scan(&h.session, &h.id, &h.ts, &bm, &h.body, &h.snippet); err != nil {
 			return nil, err
 		}
 		h.score = -bm
-		hits = append(hits, h)
+		if _, seen := bySession[h.session]; !seen {
+			order = append(order, h.session)
+		}
+		bySession[h.session] = append(bySession[h.session], h)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if len(hits) == 0 {
+	if len(bySession) == 0 {
 		return nil, nil
 	}
-	sort.Slice(hits, func(i, j int) bool { return hits[i].id < hits[j].id })
 
-	// Split where the conversation went quiet: a gap in time means a different
-	// sitting, and a different sitting is a different passage.
+	// Cluster within each conversation: a silence separates two sittings, and a
+	// session boundary always does.
 	var groups [][]hit
-	cur := []hit{hits[0]}
-	for i := 1; i < len(hits); i++ {
-		if silenceBetween(hits[i-1].ts, hits[i].ts) > opts.Gap {
-			groups = append(groups, cur)
-			cur = nil
+	for _, sid := range order {
+		hits := bySession[sid]
+		sort.Slice(hits, func(i, j int) bool { return hits[i].id < hits[j].id })
+		cur := []hit{hits[0]}
+		for i := 1; i < len(hits); i++ {
+			if silenceBetween(hits[i-1].ts, hits[i].ts) > opts.Gap {
+				groups = append(groups, cur)
+				cur = nil
+			}
+			cur = append(cur, hits[i])
 		}
-		cur = append(cur, hits[i])
+		groups = append(groups, cur)
 	}
-	groups = append(groups, cur)
 
 	var out []Passage
 	for _, g := range groups {
@@ -196,6 +278,7 @@ func FindPassages(db *sql.DB, sessionID, query string, opts PassageOpts) ([]Pass
 			}
 		}
 		out = append(out, Passage{
+			SessionID: g[0].session,
 			StartID:   g[0].id,
 			EndID:     g[len(g)-1].id,
 			StartedAt: g[0].ts,
@@ -208,10 +291,25 @@ func FindPassages(db *sql.DB, sessionID, query string, opts PassageOpts) ([]Pass
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Score > out[j].Score })
 
+	// Drop the long tail. Searching a whole archive turns up clusters that share
+	// one incidental word with the topic and score orders of magnitude below the
+	// real answer; listing them as candidates implies a choice that isn't there.
+	// Relative, not absolute, so a weak-but-best match still comes back.
+	if len(out) > 1 {
+		floor := out[0].Score / 20
+		kept := out[:1]
+		for _, p := range out[1:] {
+			if p.Score >= floor {
+				kept = append(kept, p)
+			}
+		}
+		out = kept
+	}
+
 	// Widen each passage to take in the run-up and the follow-through, then
 	// record which segments it touches.
 	for i := range out {
-		if err := widen(db, sessionID, &out[i], opts.Lead, opts.Trail, opts.Gap); err != nil {
+		if err := widen(db, out[i].SessionID, &out[i], opts.Lead, opts.Trail, opts.Gap); err != nil {
 			return nil, err
 		}
 	}

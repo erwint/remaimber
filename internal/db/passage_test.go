@@ -80,11 +80,14 @@ func TestFindPassagesPrefersCoverageOverVolume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FindPassages: %v", err)
 	}
-	if len(got) < 2 {
-		t.Fatalf("expected at least two passages (two sittings), got %d", len(got))
+	if len(got) == 0 {
+		t.Fatal("no passages found")
 	}
 	// The winner must be the 09:00 sitting: fewer mentions, but it covers every
-	// term. The 07:00 one has far more "relay" hits and must lose.
+	// term. The 07:00 one has far more "relay" hits and must lose. Here it loses
+	// so heavily it falls under the relevance floor — "relay" is in every message
+	// of this corpus, so the word carries no information and its cluster scores
+	// near zero. Whatever survives must be ranked below the winner.
 	if got[0].StartedAt[11:13] != "09" {
 		t.Errorf("focus started at %s, want the 09:00 sitting — volume beat coverage",
 			got[0].StartedAt)
@@ -92,8 +95,10 @@ func TestFindPassagesPrefersCoverageOverVolume(t *testing.T) {
 	if got[0].Coverage != 1 {
 		t.Errorf("focus coverage = %.2f, want 1.0", got[0].Coverage)
 	}
-	if got[0].Score <= got[1].Score {
-		t.Errorf("passages not ordered by score: %.1f then %.1f", got[0].Score, got[1].Score)
+	for i := 1; i < len(got); i++ {
+		if got[i].Score > got[i-1].Score {
+			t.Errorf("passages not ordered by score: %g then %g", got[i-1].Score, got[i].Score)
+		}
 	}
 
 	// An unambiguous term must still reach its own sitting.
@@ -209,4 +214,108 @@ func equalFold(a, b string) bool {
 		}
 	}
 	return true
+}
+
+// seedTwoSessions puts the same topic in two conversations: one where it is the
+// subject, one where it is mentioned in passing.
+func seedTwoSessions(t *testing.T) *sql.DB {
+	t.Helper()
+	database := testDB(t)
+	insertSession(t, database, &types.Session{SessionID: "work", ProjectKey: "-infra"})
+	insertSession(t, database, &types.Session{SessionID: "aside", ProjectKey: "-webapp"})
+
+	base := time.Date(2026, 8, 6, 9, 0, 0, 0, time.UTC)
+	tx, _ := database.Begin()
+	i := 0
+	add := func(sid string, at time.Time, role, text string) {
+		if err := InsertMessage(tx, &types.Message{
+			SessionID: sid, UUID: fmt.Sprintf("u%d", i), Type: role, Role: role,
+			ContentText: text, ContentJSON: `{"type":"` + role + `"}`,
+			Timestamp: at.Format(time.RFC3339),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		i++
+	}
+	for n := 0; n < 5; n++ {
+		add("work", base.Add(time.Duration(n)*time.Minute), "user",
+			"configure the smtp mail relay on the nas for the printer")
+		add("work", base.Add(time.Duration(n)*time.Minute+30*time.Second), "assistant",
+			"Deployed the mail relay on the nas; smtp auth verified for the printer.")
+	}
+	for n := 0; n < 6; n++ {
+		add("aside", base.Add(time.Duration(n)*time.Minute), "user",
+			"unrelated frontend work on the login page")
+		add("aside", base.Add(time.Duration(n)*time.Minute+30*time.Second), "assistant",
+			"Adjusted the login form and the session cookie handling.")
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	return database
+}
+
+func TestFindPassagesAcrossSessions(t *testing.T) {
+	database := seedTwoSessions(t)
+
+	got, err := FindPassagesAcross(database, "mail relay on the nas", PassageFilter{}, PassageOpts{})
+	if err != nil {
+		t.Fatalf("FindPassagesAcross: %v", err)
+	}
+	if len(got) == 0 {
+		t.Fatal("no passages found across sessions")
+	}
+	if got[0].SessionID != "work" {
+		t.Errorf("best passage came from %q, want \"work\"", got[0].SessionID)
+	}
+	// Every passage must name its conversation, or a cross-session result is
+	// unusable.
+	for _, p := range got {
+		if p.SessionID == "" {
+			t.Errorf("passage without a session id: %+v", p)
+		}
+	}
+
+	// A passage never straddles two conversations.
+	for _, p := range got {
+		var n int
+		database.QueryRow(`SELECT COUNT(DISTINCT session_id) FROM messages WHERE id BETWEEN ? AND ?`,
+			p.StartID, p.EndID).Scan(&n)
+		if n > 1 {
+			t.Errorf("passage [%d,%d] spans %d sessions", p.StartID, p.EndID, n)
+		}
+	}
+}
+
+func TestFindPassagesAcrossFilters(t *testing.T) {
+	database := seedTwoSessions(t)
+
+	// Excluding the winning conversation must fall through to the other, not
+	// return it anyway.
+	got, err := FindPassagesAcross(database, "relay login", PassageFilter{ExcludeSession: "work"}, PassageOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range got {
+		if p.SessionID == "work" {
+			t.Errorf("excluded session still returned: %+v", p)
+		}
+	}
+
+	// Project filter scopes the search.
+	got, err = FindPassagesAcross(database, "mail relay nas", PassageFilter{Project: "infra"}, PassageOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) == 0 || got[0].SessionID != "work" {
+		t.Errorf("project filter = %+v, want the infra session", got)
+	}
+	if got, _ = FindPassagesAcross(database, "mail relay nas", PassageFilter{Project: "webapp"}, PassageOpts{}); len(got) != 0 {
+		t.Errorf("project filter matched the wrong project: %+v", got)
+	}
+
+	// Time bounds apply.
+	if got, _ = FindPassagesAcross(database, "mail relay nas", PassageFilter{Since: "2027-01-01"}, PassageOpts{}); len(got) != 0 {
+		t.Errorf("since-filter past the end returned %d passages", len(got))
+	}
 }
