@@ -147,19 +147,67 @@ type SearchFilter struct {
 	ExcludeSession string // exclude this session ID from results
 }
 
+// QuoteFTSQuery rewrites a query so every whitespace-separated term becomes a
+// literal FTS5 phrase. FTS5 barewords may only contain alphanumerics, so a term
+// like "mail-relay" parses as an expression ("relay" reads as a column name) and
+// the whole query fails; quoting turns it into a phrase that matches the tokens
+// in order, which is what someone typing a hyphenated term means. Embedded
+// double quotes are dropped rather than escaped: the result only has to be a
+// valid literal, and this cannot itself produce a parse error.
+func QuoteFTSQuery(q string) string {
+	fields := strings.Fields(q)
+	out := make([]string, 0, len(fields))
+	for _, term := range fields {
+		if term = strings.ReplaceAll(term, `"`, ""); term != "" {
+			out = append(out, `"`+term+`"`)
+		}
+	}
+	return strings.Join(out, " ")
+}
+
+// isFTSParseError reports whether err came from FTS5 rejecting the MATCH
+// expression. The surrounding SQL is fixed and known-good, so a column that does
+// not exist can only have come from the user's query being read as an expression.
+func isFTSParseError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "fts5: syntax error") || strings.Contains(msg, "no such column")
+}
+
 // SearchMessages performs FTS5 search and returns results with session context.
+//
+// A query that FTS5 cannot parse is retried once with every term quoted, so
+// everyday searches for things like "mail-relay", "C++" or "a.b" behave as
+// literals instead of erroring, while deliberate FTS5 syntax (OR, NEAR, prefix*,
+// "phrases") still runs as written on the first attempt.
 func SearchMessages(db *sql.DB, f SearchFilter) ([]types.SearchResult, error) {
+	results, err := searchMessages(db, f, f.Query)
+	if err == nil || !isFTSParseError(err) {
+		return results, err
+	}
+	if quoted := QuoteFTSQuery(f.Query); quoted != "" && quoted != f.Query {
+		return searchMessages(db, f, quoted)
+	}
+	return results, err
+}
+
+func searchMessages(db *sql.DB, f SearchFilter, match string) ([]types.SearchResult, error) {
 	q := `
 		SELECT m.session_id, s.project_key, COALESCE(s.custom_title,''),
 			snippet(messages_fts, 0, '>>>', '<<<', '...', 40),
 			COALESCE(m.timestamp,''), m.type, COALESCE(m.role,''),
-			COALESCE(s.summary,''), COALESCE(si.repo_id,''), COALESCE(si.cwd, s.cwd, '')
+			COALESCE(s.summary,''), COALESCE(si.repo_id,''), COALESCE(si.cwd, s.cwd, ''),
+			COALESCE(g.seq, -1)
 		FROM messages_fts
 		JOIN messages m ON m.id = messages_fts.rowid
 		JOIN sessions s ON s.session_id = m.session_id
 		LEFT JOIN session_identity si ON si.session_id = m.session_id
+		LEFT JOIN session_segments g ON g.session_id = m.session_id
+			AND m.id >= g.start_id AND m.id <= COALESCE(g.end_id, g.high_water, m.id)
 		WHERE messages_fts MATCH ?`
-	args := []any{f.Query}
+	args := []any{match}
 	if f.ExcludeSession != "" {
 		q += ` AND m.session_id != ?`
 		args = append(args, f.ExcludeSession)
@@ -205,7 +253,7 @@ func SearchMessages(db *sql.DB, f SearchFilter) ([]types.SearchResult, error) {
 		var r types.SearchResult
 		if err := rows.Scan(&r.SessionID, &r.ProjectKey, &r.CustomTitle,
 			&r.Snippet, &r.Timestamp, &r.Type, &r.Role,
-			&r.Summary, &r.RepoID, &r.CWD); err != nil {
+			&r.Summary, &r.RepoID, &r.CWD, &r.SegmentSeq); err != nil {
 			return nil, err
 		}
 		results = append(results, r)

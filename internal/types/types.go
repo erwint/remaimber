@@ -57,6 +57,9 @@ type Message struct {
 	ContentJSON string `json:"content_json"`
 	ContentHash string `json:"-"`
 	Timestamp   string `json:"timestamp,omitempty"`
+	// SegmentSeq is populated only when a message is loaded as part of a segment
+	// selection (a partial resume); zero otherwise.
+	SegmentSeq int `json:"segment_seq,omitempty"`
 }
 
 // SearchResult represents a search hit with context.
@@ -71,6 +74,10 @@ type SearchResult struct {
 	Summary     string `json:"summary,omitempty"`
 	RepoID      string `json:"repo_id,omitempty"`
 	CWD         string `json:"cwd,omitempty"`
+	// SegmentSeq locates the hit within the session, so a caller can pull just
+	// that part of the conversation instead of the whole thing. -1 when the
+	// session has not been segmented yet.
+	SegmentSeq int `json:"segment_seq"`
 }
 
 // JSONLLine represents a raw parsed JSONL line from a conversation file.
