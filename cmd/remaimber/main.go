@@ -734,8 +734,14 @@ func resumeCmd() *cobra.Command {
 				}
 				return prepareResume(database, args[0], cwd, gi)
 			}
-			if match != "" || segSpec != "" || since != "" || until != "" {
-				return fmt.Errorf("--match/--segments need a session id: remaimber resume <session-id> --match <topic>")
+			// A topic with no session id searches the whole archive: which
+			// conversation it happened in is usually the forgotten part.
+			if match != "" {
+				return findAcrossSessions(database, match, cwd, gi, subpathOnly, printMsgs)
+			}
+			if segSpec != "" || since != "" || until != "" {
+				return fmt.Errorf("--segments/--since/--until need a session id: remaimber resume <session-id> --segments 3-5\n" +
+					"(or search the whole archive by topic: remaimber resume --match <topic>)")
 			}
 
 			// List candidates for this repo (optionally narrowed to this subpath).
@@ -886,6 +892,77 @@ func partialResume(database *sql.DB, prefix, cwd string, gi *gitinfo.Identity,
 	fmt.Printf("Print the messages:    remaimber resume %s --segments %s%s --print\n",
 		shortID(sessionID), formatSeqs(sel), win)
 	fmt.Printf("Full session instead:  claude --resume %s\n", sessionID)
+	return nil
+}
+
+// liveSessionID is the conversation this process was invoked from, when there is
+// one. Searching from inside a session for a topic that session is discussing
+// would otherwise rank its own chatter above the older conversation being looked
+// for — the request outranking the work.
+func liveSessionID() string {
+	return os.Getenv("CLAUDE_CODE_SESSION_ID")
+}
+
+// findAcrossSessions answers "find the part where we did X" without being told
+// which conversation. Searches the whole archive by default rather than the
+// current repo: the reason for asking is usually that the conversation itself
+// has been forgotten, and it may well have happened in another worktree.
+func findAcrossSessions(database *sql.DB, match, cwd string, gi *gitinfo.Identity, hereOnly, printMsgs bool) error {
+	f := db.PassageFilter{ExcludeSession: liveSessionID()}
+	if hereOnly {
+		f.Repo, f.Subpath = gi.RepoID, gi.Subpath
+	}
+	passages, err := db.FindPassagesAcross(database, match, f, db.PassageOpts{})
+	if err != nil {
+		return err
+	}
+	if len(passages) == 0 {
+		scope := "the archive"
+		if hereOnly {
+			scope = "this repo"
+		}
+		return fmt.Errorf("nothing in %s is about %q (searched terms: %s)",
+			scope, match, strings.Join(db.QueryTerms(match), ", "))
+	}
+
+	fmt.Printf("Searched for: %s\n\n", strings.Join(db.QueryTerms(match), ", "))
+	shown := len(passages)
+	if shown > 5 {
+		shown = 5
+	}
+	for i := 0; i < shown; i++ {
+		p := passages[i]
+		sess, _ := db.GetSession(database, p.SessionID)
+		where := ""
+		if sess != nil {
+			where = importer.PrettyProjectName(sess.ProjectKey)
+		}
+		mark := " "
+		if i == 0 {
+			mark = "*"
+		}
+		fmt.Printf("%s %s  %s  %-22s  %d hits\n", mark, shortID(p.SessionID),
+			formatSpan([2]string{p.StartedAt, p.EndedAt}), where, p.Hits)
+		fmt.Printf("    %s\n", truncate(p.Snippet, 92))
+	}
+
+	best := passages[0]
+	msgs, err := db.PassageMessages(database, best.SessionID, best)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("\nBest match: %s, %s — %d messages\n",
+		shortID(best.SessionID), formatSpan([2]string{best.StartedAt, best.EndedAt}), len(msgs))
+
+	if printMsgs {
+		fmt.Printf("\n%s\n\n", strings.Repeat("─", 72))
+		for _, m := range msgs {
+			fmt.Printf("[%s] %s\n\n", m.Role, m.ContentText)
+		}
+		return nil
+	}
+	fmt.Printf("Print it:   remaimber resume %s --match %q --print\n", shortID(best.SessionID), match)
+	fmt.Printf("Resume it:  remaimber resume %s --match %q\n", shortID(best.SessionID), match)
 	return nil
 }
 
@@ -1691,6 +1768,98 @@ func runMCP() error {
 			}
 		} else {
 			out.Note = "summaries only; call again with include_messages=true for the full text of these segments"
+		}
+		data, _ := json.MarshalIndent(out, "", "  ")
+		return mcp.NewToolResultText(string(data)), nil
+	})
+
+	// find_context — cross-session passage search. The entry point when the
+	// conversation a topic was discussed in is itself what has been forgotten.
+	findContextTool := mcp.NewTool("find_context",
+		mcp.WithDescription("Find the part of ANY archived conversation that is about a topic, described in plain words "+
+			"(\"the part where we set up a mail relay on the nas\"). Returns ranked passages across all conversations — each with "+
+			"its session, time span, segment summaries and a snippet — and the messages of the best one on request. "+
+			"Use this when you don't know which conversation holds something; use get_segments when you already have a session id."),
+		mcp.WithString("topic", mcp.Required(), mcp.Description("What to find, in plain words")),
+		mcp.WithBoolean("include_messages", mcp.Description("Include the conversation text of the best passage (default false)")),
+		mcp.WithNumber("limit", mcp.Description("How many passages to return (default 5)")),
+		mcp.WithString("project", mcp.Description("Restrict to a project key (substring match)")),
+		mcp.WithString("repo", mcp.Description("Restrict to a repo identity across worktrees ('.' = current repo)")),
+		mcp.WithString("subpath", mcp.Description("Restrict to a monorepo subpath ('.' = current subpath)")),
+		mcp.WithString("since", mcp.Description("Only messages after this time (ISO 8601)")),
+		mcp.WithString("until", mcp.Description("Only messages before this time (ISO 8601)")),
+		mcp.WithString("exclude_session", mcp.Description("Drop a conversation from the results; defaults to the live session so it cannot rank its own discussion of the topic")),
+	)
+	s.AddTool(findContextTool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		topic, _ := req.RequireString("topic")
+		repo, subpath, err := resolveRepoSubpath(req.GetString("repo", ""), req.GetString("subpath", ""))
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		exclude := req.GetString("exclude_session", "")
+		if exclude == "" {
+			exclude = liveSessionID()
+		}
+
+		importer.ImportAll(database, false)
+
+		passages, err := db.FindPassagesAcross(database, topic, db.PassageFilter{
+			Project: req.GetString("project", ""), Repo: repo, Subpath: subpath,
+			Since: req.GetString("since", ""), Until: req.GetString("until", ""),
+			ExcludeSession: exclude,
+		}, db.PassageOpts{})
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		if len(passages) == 0 {
+			return mcp.NewToolResultError(fmt.Sprintf("nothing in the archive is about %q (searched terms: %v)",
+				topic, db.QueryTerms(topic))), nil
+		}
+		limit := req.GetInt("limit", 5)
+		if limit > 0 && len(passages) > limit {
+			passages = passages[:limit]
+		}
+
+		type found struct {
+			db.Passage
+			Project     string   `json:"project"`
+			SessionInfo string   `json:"session_summary,omitempty"`
+			SegSummary  []string `json:"segment_summaries,omitempty"`
+		}
+		out := struct {
+			Terms    []string        `json:"searched_terms"`
+			Passages []found         `json:"passages"`
+			Messages []types.Message `json:"messages,omitempty"`
+			Note     string          `json:"note,omitempty"`
+		}{Terms: db.QueryTerms(topic)}
+
+		for _, p := range passages {
+			f := found{Passage: p}
+			if sess, _ := db.GetSession(database, p.SessionID); sess != nil {
+				f.Project = importer.PrettyProjectName(sess.ProjectKey)
+				f.SessionInfo = truncate(sess.Summary, 220)
+			}
+			// The segment summaries are what a caller reads to decide whether
+			// this passage is the one, before paying for its messages.
+			if segs, err := db.GetSegments(database, p.SessionID); err == nil {
+				for _, sg := range segs {
+					for _, want := range p.Segments {
+						if sg.Seq == want && sg.Summary != "" {
+							f.SegSummary = append(f.SegSummary, truncate(sg.Summary, 200))
+						}
+					}
+				}
+			}
+			out.Passages = append(out.Passages, f)
+		}
+
+		if req.GetBool("include_messages", false) {
+			if out.Messages, err = db.PassageMessages(database, passages[0].SessionID, passages[0]); err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			out.Note = "messages are those of the first passage; call get_segments with another session_id to fetch a different one"
+		} else {
+			out.Note = "call again with include_messages=true for the conversation text of the best passage"
 		}
 		data, _ := json.MarshalIndent(out, "", "  ")
 		return mcp.NewToolResultText(string(data)), nil
