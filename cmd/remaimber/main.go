@@ -798,6 +798,12 @@ func partialResume(database *sql.DB, prefix, cwd string, gi *gitinfo.Identity,
 		return fmt.Errorf("session %s has no segments yet (not summarized)\nrun: remaimber summarize %s",
 			shortID(sessionID), shortID(sessionID))
 	}
+	// A bare topic resolves to the passage it is discussed in, which is finer
+	// than the segment holding it.
+	if match != "" && segSpec == "" && since == "" && until == "" {
+		return passageResume(database, sessionID, cwd, all, match, printMsgs)
+	}
+
 	sel, hits, err := selectSegments(database, sessionID, all, match, segSpec, since, until, maxSegs)
 	if err != nil {
 		return err
@@ -880,6 +886,66 @@ func partialResume(database *sql.DB, prefix, cwd string, gi *gitinfo.Identity,
 	fmt.Printf("Print the messages:    remaimber resume %s --segments %s%s --print\n",
 		shortID(sessionID), formatSeqs(sel), win)
 	fmt.Printf("Full session instead:  claude --resume %s\n", sessionID)
+	return nil
+}
+
+// passageResume reports the stretch of a session that covers a topic, plus the
+// runners-up so an ambiguous term can be re-aimed without guessing at times.
+func passageResume(database *sql.DB, sessionID, cwd string, all []db.Segment, match string, printMsgs bool) error {
+	passages, err := db.FindPassages(database, sessionID, match, db.PassageOpts{})
+	if err != nil {
+		return err
+	}
+	if len(passages) == 0 {
+		return fmt.Errorf("nothing in %s is about %q (searched terms: %s)",
+			shortID(sessionID), match, strings.Join(db.QueryTerms(match), ", "))
+	}
+	focus := passages[0]
+
+	var total int
+	for _, s := range all {
+		total += s.MsgCount
+	}
+	msgs, err := db.PassageMessages(database, sessionID, focus)
+	if err != nil {
+		return err
+	}
+
+	carrierKey, err := mover.CarrierKeyForCWD(cwd)
+	if err != nil {
+		return err
+	}
+	if err := mover.LinkIntoProject(sessionID, carrierKey); err != nil {
+		return err
+	}
+
+	fmt.Printf("Session %s — %d segments, %d messages\n", shortID(sessionID), len(all), total)
+	fmt.Printf("Searched for: %s\n\n", strings.Join(db.QueryTerms(match), ", "))
+	fmt.Printf("Found the part about it: %s\n", formatSpan([2]string{focus.StartedAt, focus.EndedAt}))
+	fmt.Printf("  %d messages (%.0f%% of the session), segments %s, %d matching turns\n",
+		len(msgs), 100*float64(len(msgs))/float64(max(total, 1)), formatSeqs(focus.Segments), focus.Hits)
+	if focus.Snippet != "" {
+		fmt.Printf("  %s\n", truncate(focus.Snippet, 96))
+	}
+
+	if len(passages) > 1 {
+		fmt.Printf("\nOther candidates (use --since/--until to pick one):\n")
+		for i := 1; i < len(passages) && i <= 3; i++ {
+			p := passages[i]
+			fmt.Printf("  %s  %d hits  %s\n", formatSpan([2]string{p.StartedAt, p.EndedAt}),
+				p.Hits, truncate(p.Snippet, 68))
+		}
+	}
+
+	if printMsgs {
+		fmt.Printf("\n%s\n\n", strings.Repeat("─", 72))
+		for _, m := range msgs {
+			fmt.Printf("[%s] %s\n\n", m.Role, m.ContentText)
+		}
+		return nil
+	}
+	fmt.Printf("\nPrint it:  remaimber resume %s --match %q --print\n", shortID(sessionID), match)
+	fmt.Printf("Full one:  claude --resume %s\n", sessionID)
 	return nil
 }
 
@@ -966,6 +1032,66 @@ func prepareResume(database *sql.DB, prefix, cwd string, gi *gitinfo.Identity) e
 	fmt.Printf("  Continue here (no restart):   ask Claude to \"continue session %s\" — it will load the\n", shortID(sessionID))
 	fmt.Printf("                                context via remaimber and pick up without a restart.\n")
 	return nil
+}
+
+// passageResult answers a topic query with the passage that covers it, the
+// summaries of the segments it sits in, and the runners-up. Alternatives are
+// returned rather than hidden because a one-word topic is often ambiguous — an
+// archive here has two unrelated "relay" discussions — and the caller is better
+// placed than a ranking function to tell which one was meant.
+func passageResult(database *sql.DB, sessionID string, all []db.Segment, match string, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	passages, err := db.FindPassages(database, sessionID, match, db.PassageOpts{})
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	if len(passages) == 0 {
+		return mcp.NewToolResultError(fmt.Sprintf("nothing in %s is about %q (searched terms: %v)",
+			shortID(sessionID), match, db.QueryTerms(match))), nil
+	}
+	focus := passages[0]
+
+	times, err := db.SegmentTimes(database, sessionID)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	bySeq := map[int]db.Segment{}
+	for _, s := range all {
+		bySeq[s.Seq] = s
+	}
+
+	out := struct {
+		SessionID     string          `json:"session_id"`
+		Terms         []string        `json:"searched_terms"`
+		TotalSegments int             `json:"total_segments"`
+		TotalMessages int             `json:"total_messages"`
+		Focus         db.Passage      `json:"focus"`
+		Segments      []db.SegmentHit `json:"segments"`
+		Alternatives  []db.Passage    `json:"alternatives,omitempty"`
+		Messages      []types.Message `json:"messages,omitempty"`
+		Note          string          `json:"note,omitempty"`
+	}{SessionID: sessionID, Terms: db.QueryTerms(match), TotalSegments: len(all), Focus: focus}
+	for _, s := range all {
+		out.TotalMessages += s.MsgCount
+	}
+	for _, seq := range focus.Segments {
+		if s, ok := bySeq[seq]; ok {
+			span := times[seq]
+			out.Segments = append(out.Segments, db.SegmentHit{Segment: s, StartedAt: span[0], EndedAt: span[1]})
+		}
+	}
+	for i := 1; i < len(passages) && i <= 3; i++ {
+		out.Alternatives = append(out.Alternatives, passages[i])
+	}
+
+	if req.GetBool("include_messages", false) {
+		if out.Messages, err = db.PassageMessages(database, sessionID, focus); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+	} else {
+		out.Note = "segment summaries and the located passage; call again with include_messages=true for its conversation text"
+	}
+	data, _ := json.MarshalIndent(out, "", "  ")
+	return mcp.NewToolResultText(string(data)), nil
 }
 
 // selectSegments resolves which segments a partial resume should cover, from an
@@ -1485,9 +1611,11 @@ func runMCP() error {
 	// topic actually lives in, so a caller can rebuild just that context instead
 	// of loading a session that may run to thousands of messages.
 	getSegmentsTool := mcp.NewTool("get_segments",
-		mcp.WithDescription("Partial resume: find which segments of a conversation match a topic and return their summaries, "+
-			"optionally with the full messages. Use this instead of get_session when only part of a long conversation is relevant — "+
-			"search_conversations reports a segment_seq for every hit, and this fetches that part."),
+		mcp.WithDescription("Partial resume: given a topic in plain words, find the stretch of a conversation that is actually about it "+
+			"and return that context. Use this instead of get_session when only part of a long conversation is relevant. "+
+			"With 'match' it locates the passage itself — no need to know segment numbers or times — and reports alternative "+
+			"passages when a term is ambiguous, so a wrong guess can be corrected by picking another. "+
+			"Pass include_messages=true to get the conversation text of the chosen passage."),
 		mcp.WithString("session_id", mcp.Required(), mcp.Description("Session UUID or prefix")),
 		mcp.WithString("match", mcp.Description("Topic to locate; segments are ranked by hit count. Omit to list every segment.")),
 		mcp.WithString("segments", mcp.Description("Explicit selection instead of a match: \"3\", \"3,4\" or \"3-5\"")),
@@ -1515,8 +1643,17 @@ func runMCP() error {
 		maxSeq := all[len(all)-1].Seq
 
 		since, until := req.GetString("since", ""), req.GetString("until", "")
+		match := req.GetString("match", "")
+
+		// A topic with no explicit narrowing resolves to a passage: the stretch
+		// the topic is actually discussed in, which is finer than a segment and
+		// is what the caller means by "the part about X".
+		if match != "" && since == "" && until == "" && req.GetString("segments", "") == "" {
+			return passageResult(database, sessionID, all, match, req)
+		}
+
 		sel, hits, err := selectSegments(database, sessionID, all,
-			req.GetString("match", ""), req.GetString("segments", ""), since, until,
+			match, req.GetString("segments", ""), since, until,
 			req.GetInt("max_segments", 3))
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
