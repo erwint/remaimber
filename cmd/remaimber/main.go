@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -482,11 +483,19 @@ func searchCmd() *cobra.Command {
 				if importer.SessionFileExists(r.ProjectKey, r.SessionID) {
 					resumable = "*"
 				}
-				fmt.Printf("%s %s [%s] %s (%s)\n  %s\n\n",
-					resumable, shortID(r.SessionID), r.Timestamp, title, r.Role, r.Snippet)
+				// The segment locates the hit inside the session, so a long
+				// conversation can be resumed at just this part.
+				seg := ""
+				if r.SegmentSeq >= 0 {
+					seg = fmt.Sprintf(" seg %d", r.SegmentSeq)
+				}
+				fmt.Printf("%s %s%s [%s] %s (%s)\n  %s\n\n",
+					resumable, shortID(r.SessionID), seg, r.Timestamp, title, r.Role, r.Snippet)
 			}
 			if len(results) == 0 {
 				fmt.Println("No results found.")
+			} else {
+				fmt.Printf("Resume just the matching part:  remaimber resume <session-id> --match %q\n", query)
 			}
 			return nil
 		},
@@ -692,10 +701,16 @@ func moveCmd() *cobra.Command {
 // candidates; with a session id it prepares that session for resume.
 func resumeCmd() *cobra.Command {
 	var subpathOnly bool
+	var match, segSpec string
+	var printMsgs bool
+	var contextPad, maxSegs int
 	cmd := &cobra.Command{
 		Use:   "resume [session-id]",
 		Short: "Find and prepare a session to resume in the current worktree",
-		Args:  cobra.MaximumNArgs(1),
+		Long: "Find and prepare a session to resume in the current worktree.\n\n" +
+			"With --match or --segments, resumes partially: only the part(s) of the conversation\n" +
+			"that cover a topic, rather than a session that may run to thousands of messages.",
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cwd, err := os.Getwd()
 			if err != nil {
@@ -713,7 +728,14 @@ func resumeCmd() *cobra.Command {
 			defer database.Close()
 
 			if len(args) == 1 {
+				if match != "" || segSpec != "" {
+					return partialResume(database, args[0], cwd, gi,
+						match, segSpec, printMsgs, contextPad, maxSegs)
+				}
 				return prepareResume(database, args[0], cwd, gi)
+			}
+			if match != "" || segSpec != "" {
+				return fmt.Errorf("--match/--segments need a session id: remaimber resume <session-id> --match <topic>")
 			}
 
 			// List candidates for this repo (optionally narrowed to this subpath).
@@ -749,7 +771,112 @@ func resumeCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&subpathOnly, "here", false, "Only list sessions from the current subpath")
+	cmd.Flags().StringVar(&match, "match", "", "Resume only the segments matching this topic")
+	cmd.Flags().StringVar(&segSpec, "segments", "", "Resume an explicit selection: \"3\", \"3,4\" or \"3-5\"")
+	cmd.Flags().BoolVar(&printMsgs, "print", false, "Print the selected segments' messages instead of just their summaries")
+	cmd.Flags().IntVar(&contextPad, "context", 0, "Include this many neighbouring segments on each side")
+	cmd.Flags().IntVar(&maxSegs, "max-segments", 3, "Cap on how many matched segments to select")
 	return cmd
+}
+
+// partialResume prepares a session and reports only the part of it that covers a
+// topic. The session is still linked into this worktree, so a native full resume
+// stays available — narrowing is about what gets read back, not what is reachable.
+func partialResume(database *sql.DB, prefix, cwd string, gi *gitinfo.Identity,
+	match, segSpec string, printMsgs bool, contextPad, maxSegs int) error {
+	sessionID, err := db.ResolveSessionID(database, prefix)
+	if err != nil {
+		return err
+	}
+	all, err := db.GetSegments(database, sessionID)
+	if err != nil {
+		return err
+	}
+	if len(all) == 0 {
+		return fmt.Errorf("session %s has no segments yet (not summarized)\nrun: remaimber summarize %s",
+			shortID(sessionID), shortID(sessionID))
+	}
+	sel, hits, err := selectSegments(database, sessionID, all, match, segSpec, maxSegs)
+	if err != nil {
+		return err
+	}
+	sel = db.WithNeighbours(sel, contextPad, all[len(all)-1].Seq)
+
+	var total, picked int
+	for _, s := range all {
+		total += s.MsgCount
+	}
+	bySeq := map[int]db.Segment{}
+	for _, s := range all {
+		bySeq[s.Seq] = s
+	}
+	for _, q := range sel {
+		picked += bySeq[q].MsgCount
+	}
+
+	carrierKey, err := mover.CarrierKeyForCWD(cwd)
+	if err != nil {
+		return err
+	}
+	if err := mover.LinkIntoProject(sessionID, carrierKey); err != nil {
+		return err
+	}
+
+	fmt.Printf("Session %s — %d segments, %d messages\n", shortID(sessionID), len(all), total)
+	fmt.Printf("Selected %s: %d messages (%.0f%% of the session)\n\n",
+		formatSeqs(sel), picked, 100*float64(picked)/float64(max(total, 1)))
+	for _, q := range sel {
+		s := bySeq[q]
+		hint := ""
+		if h := hits[q]; h > 0 {
+			hint = fmt.Sprintf("  [%d hits]", h)
+		}
+		fmt.Printf("  [%d]%s %s\n", q, hint, truncate(strings.ReplaceAll(s.Summary, "\n", " "), 100))
+	}
+
+	if printMsgs {
+		msgs, err := db.SegmentMessages(database, sessionID, sel)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("\n%s\n\n", strings.Repeat("─", 72))
+		for _, m := range msgs {
+			fmt.Printf("[%s] %s\n\n", m.Role, m.ContentText)
+		}
+		return nil
+	}
+
+	fmt.Printf("\nLoad this slice here:  ask Claude to \"continue session %s segments %s\"\n",
+		shortID(sessionID), formatSeqs(sel))
+	fmt.Printf("Print the messages:    remaimber resume %s --segments %s --print\n",
+		shortID(sessionID), formatSeqs(sel))
+	fmt.Printf("Full session instead:  claude --resume %s\n", sessionID)
+	return nil
+}
+
+// formatSeqs renders segment numbers compactly, collapsing runs into ranges
+// ("3,4,5,9" becomes "3-5,9") so it round-trips through --segments.
+func formatSeqs(seqs []int) string {
+	if len(seqs) == 0 {
+		return "(none)"
+	}
+	var parts []string
+	for i := 0; i < len(seqs); {
+		j := i
+		for j+1 < len(seqs) && seqs[j+1] == seqs[j]+1 {
+			j++
+		}
+		switch {
+		case j == i:
+			parts = append(parts, strconv.Itoa(seqs[i]))
+		case j == i+1:
+			parts = append(parts, strconv.Itoa(seqs[i]), strconv.Itoa(seqs[j]))
+		default:
+			parts = append(parts, fmt.Sprintf("%d-%d", seqs[i], seqs[j]))
+		}
+		i = j + 1
+	}
+	return strings.Join(parts, ",")
 }
 
 // prepareResume places a session under the carrier key and prints resume options.
@@ -789,6 +916,73 @@ func prepareResume(database *sql.DB, prefix, cwd string, gi *gitinfo.Identity) e
 	fmt.Printf("  Continue here (no restart):   ask Claude to \"continue session %s\" — it will load the\n", shortID(sessionID))
 	fmt.Printf("                                context via remaimber and pick up without a restart.\n")
 	return nil
+}
+
+// selectSegments resolves which segments a partial resume should cover, from an
+// explicit spec, a topic match, or neither (the whole session). It returns the
+// chosen sequence numbers and, when a match drove the choice, the per-segment hit
+// counts. A match that finds nothing is an error rather than a silent fall back
+// to everything, since quietly loading a 1200-message session when the caller
+// asked for one topic is the opposite of what they wanted.
+func selectSegments(database *sql.DB, sessionID string, all []db.Segment, match, spec string, maxSegments int) ([]int, map[int]int, error) {
+	hits := map[int]int{}
+
+	if spec != "" {
+		sel, err := db.ParseSegmentSpec(spec)
+		if err != nil {
+			return nil, nil, err
+		}
+		valid := map[int]bool{}
+		for _, s := range all {
+			valid[s.Seq] = true
+		}
+		for _, s := range sel {
+			if !valid[s] {
+				return nil, nil, fmt.Errorf("segment %d does not exist (session has %d: 0-%d)",
+					s, len(all), all[len(all)-1].Seq)
+			}
+		}
+		return sel, hits, nil
+	}
+
+	if match == "" {
+		sel := make([]int, len(all))
+		for i, s := range all {
+			sel[i] = s.Seq
+		}
+		return sel, hits, nil
+	}
+
+	matched, err := db.SegmentsMatching(database, sessionID, match)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(matched) == 0 {
+		return nil, nil, fmt.Errorf("no segment of %s matches %q", shortID(sessionID), match)
+	}
+	// Drop incidental mentions. A topic discussed across a session concentrates
+	// its hits in a couple of segments; a segment holding a small fraction of the
+	// leader's hits merely name-dropped it, and pulling it in dilutes the slice.
+	// The leader always survives, so this can never empty a non-empty match.
+	floor := matched[0].Hits / 5
+	kept := matched[:1]
+	for _, m := range matched[1:] {
+		if m.Hits >= floor {
+			kept = append(kept, m)
+		}
+	}
+	matched = kept
+
+	if maxSegments > 0 && len(matched) > maxSegments {
+		matched = matched[:maxSegments]
+	}
+	sel := make([]int, len(matched))
+	for i, m := range matched {
+		sel[i] = m.Seq
+		hits[m.Seq] = m.Hits
+	}
+	sort.Ints(sel)
+	return sel, hits, nil
 }
 
 // isLikelyLive reports whether a session's source JSONL was modified very
@@ -1218,6 +1412,74 @@ func runMCP() error {
 			Summary   string       `json:"summary"`
 			Segments  []db.Segment `json:"segments"`
 		}{sessionID, sess.Summary, segs}
+		data, _ := json.MarshalIndent(out, "", "  ")
+		return mcp.NewToolResultText(string(data)), nil
+	})
+
+	// get_segments — partial resume. Locates the part(s) of a conversation a
+	// topic actually lives in, so a caller can rebuild just that context instead
+	// of loading a session that may run to thousands of messages.
+	getSegmentsTool := mcp.NewTool("get_segments",
+		mcp.WithDescription("Partial resume: find which segments of a conversation match a topic and return their summaries, "+
+			"optionally with the full messages. Use this instead of get_session when only part of a long conversation is relevant — "+
+			"search_conversations reports a segment_seq for every hit, and this fetches that part."),
+		mcp.WithString("session_id", mcp.Required(), mcp.Description("Session UUID or prefix")),
+		mcp.WithString("match", mcp.Description("Topic to locate; segments are ranked by hit count. Omit to list every segment.")),
+		mcp.WithString("segments", mcp.Description("Explicit selection instead of a match: \"3\", \"3,4\" or \"3-5\"")),
+		mcp.WithBoolean("include_messages", mcp.Description("Include the full messages of the selected segments, not just summaries (default false)")),
+		mcp.WithNumber("context", mcp.Description("Also include this many neighbouring segments on each side (default 0)")),
+		mcp.WithNumber("max_segments", mcp.Description("Cap on how many matched segments to select (default 3)")),
+	)
+	s.AddTool(getSegmentsTool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		prefix, _ := req.RequireString("session_id")
+		sessionID, err := db.ResolveSessionID(database, prefix)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		all, err := db.GetSegments(database, sessionID)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		if len(all) == 0 {
+			return mcp.NewToolResultError(fmt.Sprintf(
+				"session %s has no segments yet (not summarized); use get_session instead or run 'remaimber summarize %s'",
+				shortID(sessionID), shortID(sessionID))), nil
+		}
+		maxSeq := all[len(all)-1].Seq
+
+		sel, hits, err := selectSegments(database, sessionID, all,
+			req.GetString("match", ""), req.GetString("segments", ""), req.GetInt("max_segments", 3))
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		sel = db.WithNeighbours(sel, req.GetInt("context", 0), maxSeq)
+
+		out := struct {
+			SessionID     string          `json:"session_id"`
+			TotalSegments int             `json:"total_segments"`
+			TotalMessages int             `json:"total_messages"`
+			Selected      []int           `json:"selected_segments"`
+			Segments      []db.SegmentHit `json:"segments"`
+			Messages      []types.Message `json:"messages,omitempty"`
+			Note          string          `json:"note,omitempty"`
+		}{SessionID: sessionID, TotalSegments: len(all), Selected: sel}
+		for _, s := range all {
+			out.TotalMessages += s.MsgCount
+		}
+		for _, s := range all {
+			for _, want := range sel {
+				if s.Seq == want {
+					out.Segments = append(out.Segments, db.SegmentHit{Segment: s, Hits: hits[s.Seq]})
+				}
+			}
+		}
+		if req.GetBool("include_messages", false) {
+			if out.Messages, err = db.SegmentMessages(database, sessionID, sel); err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+		} else {
+			out.Note = "summaries only; call again with include_messages=true for the full text of these segments"
+		}
 		data, _ := json.MarshalIndent(out, "", "  ")
 		return mcp.NewToolResultText(string(data)), nil
 	})
