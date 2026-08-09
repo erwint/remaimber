@@ -161,9 +161,17 @@ func findPassages(db *sql.DB, query string, f PassageFilter, opts PassageOpts) (
 		JOIN sessions s ON s.session_id = m.session_id
 		LEFT JOIN session_identity si ON si.session_id = m.session_id`
 	}
+	// Tool-result turns are excluded, as everywhere else that reads conversation
+	// content. Beyond being machine noise, they close a feedback loop specific to
+	// this tool: running a search archives its own output, so the results become
+	// messages that match the same query next time and can outrank the
+	// conversation being looked for. Compaction markers are summaries of earlier
+	// turns, not turns, and would double-count whatever they describe.
 	q += `
 		WHERE messages_fts MATCH ?
-		  AND m.content_json NOT LIKE '%"isSidechain":true%'`
+		  AND m.content_json NOT LIKE '%"isSidechain":true%'
+		  AND m.content_json NOT LIKE '%"isCompactSummary":true%'
+		  AND NOT (m.type = 'user' AND m.content_json LIKE '%"tool_result"%')`
 	args := []any{strings.Join(quoted, " OR ")}
 	if f.SessionID != "" {
 		q += ` AND m.session_id = ?`

@@ -435,7 +435,7 @@ func sessionLocation(s types.Session) string {
 func searchCmd() *cobra.Command {
 	var project, repo, subpath, role, since, until, excludeSession string
 	var limit int
-	var jsonOut bool
+	var jsonOut, includeToolOutput bool
 	cmd := &cobra.Command{
 		Use:   "search <query>",
 		Short: "Search conversations (FTS5)",
@@ -454,15 +454,16 @@ func searchCmd() *cobra.Command {
 			defer database.Close()
 
 			results, err := db.SearchMessages(database, db.SearchFilter{
-				Query:          query,
-				Project:        project,
-				Repo:           repo,
-				Subpath:        subpath,
-				Role:           role,
-				Since:          since,
-				Until:          until,
-				Limit:          limit,
-				ExcludeSession: excludeSession,
+				Query:             query,
+				Project:           project,
+				Repo:              repo,
+				Subpath:           subpath,
+				Role:              role,
+				Since:             since,
+				Until:             until,
+				Limit:             limit,
+				ExcludeSession:    excludeSession,
+				IncludeToolOutput: includeToolOutput,
 			})
 			if err != nil {
 				return err
@@ -500,6 +501,7 @@ func searchCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&includeToolOutput, "include-tool-output", false, "Also search tool results (command/file output), off by default as machine noise")
 	cmd.Flags().StringVar(&project, "project", "", "Filter by project key")
 	cmd.Flags().StringVar(&repo, "repo", "", "Filter by repo identity across worktrees ('.' = current repo)")
 	cmd.Flags().StringVar(&subpath, "subpath", "", "Filter by monorepo subpath ('.' = current subpath)")
@@ -1596,6 +1598,7 @@ func runMCP() error {
 		mcp.WithString("until", mcp.Description("Filter messages before this date (ISO 8601)")),
 		mcp.WithNumber("limit", mcp.Description("Max results (default 10)")),
 		mcp.WithString("exclude_session", mcp.Description("Exclude this session ID from results")),
+		mcp.WithBoolean("include_tool_output", mcp.Description("Also search tool results (command/file output). Off by default: they are machine noise and include this tool's own archived output.")),
 		mcp.WithString("repo", mcp.Description("Filter by repo identity across worktrees ('.' = current repo)")),
 		mcp.WithString("subpath", mcp.Description("Filter by monorepo subpath ('.' = current subpath)")),
 	)
@@ -1606,15 +1609,16 @@ func runMCP() error {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 		f := db.SearchFilter{
-			Query:          query,
-			Project:        req.GetString("project", ""),
-			Repo:           repo,
-			Subpath:        subpath,
-			Role:           req.GetString("role", ""),
-			Since:          req.GetString("since", ""),
-			Until:          req.GetString("until", ""),
-			Limit:          req.GetInt("limit", 10),
-			ExcludeSession: req.GetString("exclude_session", ""),
+			Query:             query,
+			Project:           req.GetString("project", ""),
+			Repo:              repo,
+			Subpath:           subpath,
+			Role:              req.GetString("role", ""),
+			Since:             req.GetString("since", ""),
+			Until:             req.GetString("until", ""),
+			Limit:             req.GetInt("limit", 10),
+			ExcludeSession:    req.GetString("exclude_session", ""),
+			IncludeToolOutput: req.GetBool("include_tool_output", false),
 		}
 
 		importer.ImportAll(database, false)
