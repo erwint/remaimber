@@ -145,6 +145,11 @@ type SearchFilter struct {
 	Until          string
 	Limit          int
 	ExcludeSession string // exclude this session ID from results
+	// IncludeToolOutput brings tool-result turns back into the results. They are
+	// dropped by default: they are the bulk of an agentic transcript, and they
+	// include this tool's own archived output, so a search for a term can
+	// otherwise surface earlier searches for the same term.
+	IncludeToolOutput bool
 }
 
 // QuoteFTSQuery rewrites a query so every whitespace-separated term becomes a
@@ -208,6 +213,9 @@ func searchMessages(db *sql.DB, f SearchFilter, match string) ([]types.SearchRes
 			AND m.id >= g.start_id AND m.id <= COALESCE(g.end_id, g.high_water, m.id)
 		WHERE messages_fts MATCH ?`
 	args := []any{match}
+	if !f.IncludeToolOutput {
+		q += ` AND NOT (m.type = 'user' AND m.content_json LIKE '%"tool_result"%')`
+	}
 	if f.ExcludeSession != "" {
 		q += ` AND m.session_id != ?`
 		args = append(args, f.ExcludeSession)
