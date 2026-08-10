@@ -34,9 +34,32 @@ var (
 )
 
 func main() {
+	if err := newRootCmd().Execute(); err != nil {
+		os.Exit(1)
+	}
+}
+
+// newRootCmd assembles the command tree. Split out from main so tests can walk
+// it — see TestEveryCommandHasAnExample.
+func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
-		Use:     "remaimber",
-		Short:   "Archive and search Claude Code conversations",
+		Use:   "remaimber",
+		Short: "Archive and search Claude Code conversations",
+		Long: "Archive and search Claude Code conversations.\n\n" +
+			"Transcripts are imported into SQLite and indexed, then summarized in segments so a\n" +
+			"long conversation can be recalled — or resumed in part — without reading all of it.",
+		Example: `  # One-time setup: install the import hooks and register the MCP server
+  remaimber setup
+
+  # Find something you discussed before
+  remaimber search mail-relay
+  remaimber list --repo .
+
+  # Pull back just the part of a past conversation you need
+  remaimber resume --match 'the part where we set up a mail relay on the nas'
+
+  # See what a long session was about, without reading it
+  remaimber summary b2bd8168`,
 		Version: fmt.Sprintf("%s (built: %s)", version, date),
 	}
 
@@ -64,9 +87,7 @@ func main() {
 	root.AddCommand(mcpCmd())
 	root.AddCommand(completionCmd())
 
-	if err := root.Execute(); err != nil {
-		os.Exit(1)
-	}
+	return root
 }
 
 func openDB() (*sql.DB, error) {
@@ -102,6 +123,11 @@ func importCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "import",
 		Short: "Import conversations from ~/.claude/projects/",
+		Example: `  # Import anything new since the last run
+  remaimber import
+
+  # Re-read every transcript from the beginning (after a schema change)
+  remaimber import --force`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			database, err := openDB()
 			if err != nil {
@@ -166,7 +192,12 @@ func importFileCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "import-file <path>",
 		Short: "Import a single JSONL file",
-		Args:  cobra.ExactArgs(1),
+		Example: `  # Import one transcript, guessing the project from the filename
+  remaimber import-file ~/.claude/projects/-src-myapp/abc123.jsonl
+
+  # Attribute it to a specific project key
+  remaimber import-file ./rescued.jsonl --project -Volumes-Data-src-myapp`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			database, err := openDB()
 			if err != nil {
@@ -296,7 +327,9 @@ func markEndedCmd() *cobra.Command {
 // cwd still resolves on disk. Sessions from deleted worktrees stay null.
 func backfillIdentityCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "backfill-identity",
+		Use: "backfill-identity",
+		Example: `  # Fill in repo identity for older sessions, so --repo/--subpath find them
+  remaimber backfill-identity`,
 		Short: "Backfill repo identity for existing sessions whose cwd still exists",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			database, err := openDB()
@@ -347,6 +380,14 @@ func listCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List archived sessions",
+		Example: `  # The 20 most recent sessions
+  remaimber list
+
+  # Everything for this repo, including other worktrees
+  remaimber list --repo .
+
+  # This subpath of a monorepo, last month, as JSON
+  remaimber list --repo . --subpath . --since 2026-07-01 --json`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			repo, subpath, err := resolveRepoSubpath(repo, subpath)
 			if err != nil {
@@ -439,7 +480,19 @@ func searchCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "search <query>",
 		Short: "Search conversations (FTS5)",
-		Args:  cobra.MinimumNArgs(1),
+		Example: `  # Plain words; punctuation and hyphens are handled for you
+  remaimber search mail-relay
+
+  # FTS5 operators still work when you want them
+  remaimber search 'compaction OR segment'
+  remaimber search 'segm*'
+
+  # Narrow to this repo, to what you said, and to a date range
+  remaimber search postfix --repo . --role user --since 2026-08-01
+
+  # Search command output too (off by default as machine noise)
+  remaimber search 'exit status 1' --include-tool-output`,
+		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			query := strings.Join(args, " ")
 			repo, subpath, err := resolveRepoSubpath(repo, subpath)
@@ -519,7 +572,12 @@ func showCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "show <session-id>",
 		Short: "Show messages from a session",
-		Args:  cobra.ExactArgs(1),
+		Example: `  # A session id, or any unambiguous prefix of one
+  remaimber show b2bd8168
+
+  # Only what was actually said, skipping tool traffic
+  remaimber show b2bd8168 --type user,assistant`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			database, err := openDB()
 			if err != nil {
@@ -567,7 +625,13 @@ func exportCmd() *cobra.Command {
 	var last int
 	var msgTypes string
 	cmd := &cobra.Command{
-		Use:   "export [session-id]",
+		Use: "export [session-id]",
+		Example: `  # Export one session as markdown
+  remaimber export b2bd8168 --format markdown > session.md
+
+  # The most recent session, and the one before it
+  remaimber export --last 1
+  remaimber export --last 2 --format json`,
 		Short: "Export a session in markdown, json, or text format",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -626,7 +690,12 @@ func exportCmd() *cobra.Command {
 func deleteCmd() *cobra.Command {
 	var yes bool
 	cmd := &cobra.Command{
-		Use:   "delete <session-id>",
+		Use: "delete <session-id>",
+		Example: `  # Prompts before deleting
+  remaimber delete b2bd8168
+
+  # No prompt (scripts)
+  remaimber delete b2bd8168 --yes`,
 		Short: "Delete a session and its messages from the database",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -666,7 +735,12 @@ func deleteCmd() *cobra.Command {
 func moveCmd() *cobra.Command {
 	var copyOnly bool
 	cmd := &cobra.Command{
-		Use:   "move <session-id> <target-project>",
+		Use: "move <session-id> <target-project>",
+		Example: `  # Re-file a session that was archived under the wrong project
+  remaimber move b2bd8168 -Volumes-Data-src-myapp
+
+  # Leave the original in place
+  remaimber move b2bd8168 -Volumes-Data-src-myapp --copy`,
 		Short: "Move or copy a conversation to a different project",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -710,8 +784,33 @@ func resumeCmd() *cobra.Command {
 		Use:   "resume [session-id]",
 		Short: "Find and prepare a session to resume in the current worktree",
 		Long: "Find and prepare a session to resume in the current worktree.\n\n" +
-			"With --match or --segments, resumes partially: only the part(s) of the conversation\n" +
-			"that cover a topic, rather than a session that may run to thousands of messages.",
+			"With no arguments, lists sessions for this repo. With a session id, prepares that\n" +
+			"session so `claude --resume` can open it here, whichever worktree it ran in.\n\n" +
+			"With --match, resumes partially: describe the part you want in plain words and it\n" +
+			"locates the stretch of conversation actually about it, rather than loading a session\n" +
+			"that may run to thousands of messages. Given no session id, --match searches every\n" +
+			"archived conversation — for when which one it was is the part you've forgotten.",
+		Example: `  # What can I resume here?
+  remaimber resume
+  remaimber resume --here          # only this subpath of a monorepo
+
+  # Prepare a whole session to resume in this worktree
+  remaimber resume b2bd8168
+
+  # Find the part about a topic, anywhere in the archive
+  remaimber resume --match 'the part where we set up a mail relay on the nas'
+
+  # ...or within one session you already know
+  remaimber resume b2bd8168 --match 'smtp relay'
+  remaimber resume b2bd8168 --match 'smtp relay' --print   # dump the messages
+
+  # Pick a part by hand instead: segment numbers or a time window
+  remaimber resume b2bd8168 --segments 4
+  remaimber resume b2bd8168 --segments 3-5 --print
+  remaimber resume b2bd8168 --since 2026-08-06T11:18 --until 2026-08-06T11:45
+
+  # Widen a match with neighbouring segments for run-up
+  remaimber resume b2bd8168 --match 'smtp relay' --context 1`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cwd, err := os.Getwd()
@@ -1276,7 +1375,18 @@ func isLikelyLive(s *types.Session) bool {
 func summarizeCmd() *cobra.Command {
 	var minNew int
 	cmd := &cobra.Command{
-		Use:   "summarize [session-id]",
+		Use: "summarize [session-id]",
+		Example: `  # Summarize every session with enough new material
+  remaimber summarize
+
+  # Re-summarize one session
+  remaimber summarize b2bd8168
+
+  # Only sessions with at least 20 new messages
+  remaimber summarize --min 20
+
+  # Use a local model instead of the claude CLI
+  REMAIMBER_LLM=http://localhost:11434/v1 REMAIMBER_LLM_MODEL=qwen3 remaimber summarize`,
 		Short: "Generate or update rolling summaries of sessions",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -1325,7 +1435,12 @@ func summarizeCmd() *cobra.Command {
 func summaryCmd() *cobra.Command {
 	var jsonOut bool
 	cmd := &cobra.Command{
-		Use:   "summary <session-id>",
+		Use: "summary <session-id>",
+		Example: `  # Roll-up plus per-segment summaries
+  remaimber summary b2bd8168
+
+  # As JSON, for scripting
+  remaimber summary b2bd8168 --json`,
 		Short: "Show a session's summary and its segments",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -1456,7 +1571,9 @@ func summarizeIfStaleCmd() *cobra.Command {
 
 func statsCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "stats",
+		Use: "stats",
+		Example: `  # Session, message and project counts
+  remaimber stats`,
 		Short: "Show database statistics",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			database, err := openDB()
@@ -1483,7 +1600,9 @@ func statsCmd() *cobra.Command {
 
 func verifyCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "verify",
+		Use: "verify",
+		Example: `  # Check the FTS index and segment ranges against the messages table
+  remaimber verify`,
 		Short: "Verify database integrity",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			database, err := openDB()
@@ -1529,7 +1648,9 @@ func verifyCmd() *cobra.Command {
 
 func setupCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "setup",
+		Use: "setup",
+		Example: `  # Wire up the import hooks and register the MCP server
+  remaimber setup`,
 		Short: "Configure Claude Code settings (hooks + MCP server)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return setup.Run()
@@ -1539,7 +1660,12 @@ func setupCmd() *cobra.Command {
 
 func mcpCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "mcp",
+		Use: "mcp",
+		Example: `  # Started by Claude Code, not usually by hand
+  remaimber mcp
+
+  # Exercise a tool directly (stdio JSON-RPC)
+  echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | remaimber mcp`,
 		Short: "Start MCP server (stdio transport)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runMCP()
