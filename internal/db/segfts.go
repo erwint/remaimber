@@ -149,15 +149,27 @@ func ReindexSummaries(db *sql.DB) (int, error) {
 // number that says whether recall can be trusted, and the one thing `stats` could
 // not previously answer.
 type SummaryCoverage struct {
-	Sessions           int
-	SessionsWithSum    int
-	Segments           int
-	SegmentsWithSum    int
-	IndexedSummaries   int
-	TotalCostUSD       float64
-	TotalLLMCalls      int
+	Sessions         int
+	SessionsWithSum  int
+	Segments         int
+	SegmentsWithSum  int
+	IndexedSummaries int
+	TotalCostUSD     float64
+	TotalLLMCalls    int
+	// Unsummarized sessions split by whether summarizing them would be worth
+	// anything. Most sessions that lack a summary are slash-command invocations
+	// and permission prompts a few messages long; reporting those as a gap is a
+	// false alarm that sends someone off to spend model calls on nothing.
+	// Backlog counts only sessions with enough real content to be worth a summary.
+	Backlog            int
+	TooSmall           int
 	OldestUnsummarized string
 }
+
+// SummarizeThreshold is the default minimum of salient messages before a session
+// is worth summarizing. Shared so coverage reporting and the summarize sweep
+// cannot disagree about what counts as a backlog.
+const SummarizeThreshold = 6
 
 func GetSummaryCoverage(db *sql.DB) (SummaryCoverage, error) {
 	var c SummaryCoverage
@@ -173,5 +185,22 @@ func GetSummaryCoverage(db *sql.DB) (SummaryCoverage, error) {
 			(SELECT COALESCE(MIN(COALESCE(started_at,'')),'') FROM sessions WHERE COALESCE(summary,'') = '')
 	`).Scan(&c.Sessions, &c.SessionsWithSum, &c.Segments, &c.SegmentsWithSum,
 		&c.IndexedSummaries, &c.TotalCostUSD, &c.TotalLLMCalls, &c.OldestUnsummarized)
+	if err != nil {
+		return c, err
+	}
+
+	err = db.QueryRow(`
+		SELECT
+			COALESCE(SUM(CASE WHEN n >= ? THEN 1 ELSE 0 END),0),
+			COALESCE(SUM(CASE WHEN n <  ? THEN 1 ELSE 0 END),0)
+		FROM (
+			SELECT COUNT(m.id) AS n
+			FROM sessions s
+			LEFT JOIN messages m ON m.session_id = s.session_id
+				AND m.role IN ('user','assistant')
+				AND m.is_tool_result = 0 AND m.is_sidechain = 0 AND m.is_compact_summary = 0
+			WHERE COALESCE(s.summary,'') = ''
+			GROUP BY s.session_id
+		)`, SummarizeThreshold, SummarizeThreshold).Scan(&c.Backlog, &c.TooSmall)
 	return c, err
 }

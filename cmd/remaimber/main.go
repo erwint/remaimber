@@ -1639,8 +1639,14 @@ func statsCmd() *cobra.Command {
 				} else {
 					fmt.Printf("  Cost so far:          not recorded (summarized before cost tracking)\n")
 				}
-				if c.SessionsWithSum < c.Sessions {
-					fmt.Printf("  %d unsummarized — run: remaimber summarize --all\n", c.Sessions-c.SessionsWithSum)
+				// Most unsummarized sessions are slash-command invocations a few
+				// messages long. Only a real backlog is worth acting on.
+				if c.Backlog > 0 {
+					fmt.Printf("  Backlog:              %d session(s) with material — run: remaimber summarize --all\n", c.Backlog)
+				}
+				if c.TooSmall > 0 {
+					fmt.Printf("  Skipped as trivial:   %d session(s) under %d messages (slash commands, prompts)\n",
+						c.TooSmall, db.SummarizeThreshold)
 				}
 			}
 
@@ -2312,11 +2318,17 @@ func doctorCmd() *cobra.Command {
 			switch {
 			case c.Sessions == 0:
 				warn("no sessions archived yet")
-			case c.SessionsWithSum == c.Sessions:
-				ok("all %d sessions summarized", c.Sessions)
+			case c.Backlog > 0:
+				warn("%d session(s) with real content are unsummarized — run: remaimber summarize --all", c.Backlog)
 			default:
-				warn("%d of %d sessions unsummarized — run: remaimber summarize --all",
-					c.Sessions-c.SessionsWithSum, c.Sessions)
+				ok("everything worth summarizing is summarized (%d/%d sessions)", c.SessionsWithSum, c.Sessions)
+			}
+			if c.TooSmall > 0 {
+				// Stated, not warned: these are slash-command invocations and
+				// permission prompts, and summarizing them would spend model
+				// calls to describe nothing.
+				fmt.Printf("  note  %d session(s) skipped as trivial (under %d messages)\n",
+					c.TooSmall, db.SummarizeThreshold)
 			}
 			if c.SegmentsWithSum > c.IndexedSummaries {
 				warn("%d summaries are not in the search index — run: remaimber summarize --reindex",
