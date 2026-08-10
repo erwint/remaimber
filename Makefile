@@ -6,7 +6,13 @@ build:
 	go build -ldflags "$(LDFLAGS)" -o bin/remaimber ./cmd/remaimber
 
 install: build
-	cp bin/remaimber ~/.local/bin/remaimber
+	@mkdir -p ~/.local/bin
+	@# Replace atomically. Writing over the binary in place corrupts the mapping
+	@# of any copy already running — and the hooks run remaimber in the
+	@# background constantly — after which macOS SIGKILLs every new invocation.
+	@cp bin/remaimber ~/.local/bin/.remaimber.new
+	@mv -f ~/.local/bin/.remaimber.new ~/.local/bin/remaimber
+	@echo "installed $$(~/.local/bin/remaimber --version)"
 
 test:
 	go test ./... -v -count=1
