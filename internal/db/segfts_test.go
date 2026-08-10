@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"fmt"
 	"testing"
 
 	"github.com/erwin/remaimber/internal/types"
@@ -135,5 +136,55 @@ func TestSegmentCostRoundTrips(t *testing.T) {
 	c, _ := GetSummaryCoverage(database)
 	if c.TotalCostUSD != 0.0123 || c.TotalLLMCalls != 3 {
 		t.Errorf("coverage totals = $%v over %d calls", c.TotalCostUSD, c.TotalLLMCalls)
+	}
+}
+
+// Most sessions without a summary are slash-command invocations a few messages
+// long. Counting those as a backlog is a false alarm that sends someone off to
+// spend model calls describing nothing.
+func TestCoverageSeparatesBacklogFromTrivia(t *testing.T) {
+	database := testDB(t)
+	insertSession(t, database, &types.Session{SessionID: "real", ProjectKey: "-p"})
+	insertSession(t, database, &types.Session{SessionID: "slash", ProjectKey: "-p"})
+	insertSession(t, database, &types.Session{SessionID: "empty", ProjectKey: "-p"})
+
+	tx, _ := database.Begin()
+	for i := 0; i < 8; i++ {
+		InsertMessage(tx, &types.Message{SessionID: "real", UUID: fmt.Sprintf("r%d", i),
+			Type: "user", Role: "user", ContentText: "substantive work here", ContentJSON: `{"type":"user"}`})
+	}
+	for i := 0; i < 2; i++ {
+		InsertMessage(tx, &types.Message{SessionID: "slash", UUID: fmt.Sprintf("s%d", i),
+			Type: "user", Role: "user", ContentText: "/model", ContentJSON: `{"type":"user"}`})
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := GetSummaryCoverage(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Backlog != 1 {
+		t.Errorf("backlog = %d, want 1 (only the session with real content)", c.Backlog)
+	}
+	if c.TooSmall != 2 {
+		t.Errorf("trivial = %d, want 2 (the slash command and the empty session)", c.TooSmall)
+	}
+}
+
+// An archive with nothing unsummarized must not error: SUM over no rows is NULL.
+func TestCoverageWithNoUnsummarizedSessions(t *testing.T) {
+	database := testDB(t)
+	insertSession(t, database, &types.Session{SessionID: "s", ProjectKey: "-p", Summary: "done"})
+	if _, err := database.Exec(`UPDATE sessions SET summary='done' WHERE session_id='s'`); err != nil {
+		t.Fatal(err)
+	}
+	c, err := GetSummaryCoverage(database)
+	if err != nil {
+		t.Fatalf("coverage over a fully summarized archive failed: %v", err)
+	}
+	if c.Backlog != 0 || c.TooSmall != 0 {
+		t.Errorf("got backlog=%d trivial=%d, want 0/0", c.Backlog, c.TooSmall)
 	}
 }
