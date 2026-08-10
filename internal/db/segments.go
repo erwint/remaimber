@@ -27,6 +27,11 @@ type Segment struct {
 	HighWater int64  `json:"-"`
 	Closed    bool   `json:"closed"`
 	Reason    string `json:"reason,omitempty"`
+	// What summarizing this segment cost, and how many model calls it took.
+	// Recorded per segment so spend attributes to the part of the conversation
+	// that caused it.
+	CostUSD  float64 `json:"cost_usd,omitempty"`
+	LLMCalls int     `json:"llm_calls,omitempty"`
 }
 
 // SegSpan is a planned segment boundary (no summary yet) — the pure output of
@@ -103,9 +108,9 @@ func SegmentContent(db *sql.DB, sessionID string, afterID int64) ([]types.Messag
 		FROM messages
 		WHERE session_id = ? AND id > ? AND role IN ('user','assistant')
 		  AND COALESCE(content_text,'') != ''
-		  AND content_json NOT LIKE '%"isCompactSummary":true%'
-		  AND content_json NOT LIKE '%"isSidechain":true%'
-		  AND NOT (type = 'user' AND content_json LIKE '%"tool_result"%')
+		  AND is_compact_summary = 0
+		  AND is_sidechain = 0
+		  AND is_tool_result = 0
 		ORDER BY id`,
 		summaryHeadCap+summaryTailCap, summaryHeadCap, summaryElision, summaryTailCap,
 		sessionID, afterID)
@@ -132,7 +137,7 @@ func SegmentContent(db *sql.DB, sessionID string, afterID int64) ([]types.Messag
 // (the boundary markers), sorted ascending.
 func CompactionIDs(db *sql.DB, sessionID string) ([]int64, error) {
 	rows, err := db.Query(`SELECT id FROM messages
-		WHERE session_id = ? AND content_json LIKE '%"isCompactSummary":true%'
+		WHERE session_id = ? AND is_compact_summary = 1
 		ORDER BY id`, sessionID)
 	if err != nil {
 		return nil, err
@@ -152,7 +157,8 @@ func CompactionIDs(db *sql.DB, sessionID string) ([]int64, error) {
 // GetSegments returns a session's stored segments ordered by seq.
 func GetSegments(db *sql.DB, sessionID string) ([]Segment, error) {
 	rows, err := db.Query(`SELECT seq, start_id, COALESCE(end_id,0), COALESCE(start_uuid,''),
-			COALESCE(end_uuid,''), COALESCE(summary,''), msg_count, high_water, closed, COALESCE(reason,'')
+			COALESCE(end_uuid,''), COALESCE(summary,''), msg_count, high_water, closed, COALESCE(reason,''),
+			COALESCE(cost_usd,0), COALESCE(llm_calls,0)
 		FROM session_segments WHERE session_id = ? ORDER BY seq`, sessionID)
 	if err != nil {
 		return nil, err
@@ -163,7 +169,8 @@ func GetSegments(db *sql.DB, sessionID string) ([]Segment, error) {
 		s := Segment{SessionID: sessionID}
 		var closed int
 		if err := rows.Scan(&s.Seq, &s.StartID, &s.EndID, &s.StartUUID, &s.EndUUID,
-			&s.Summary, &s.MsgCount, &s.HighWater, &closed, &s.Reason); err != nil {
+			&s.Summary, &s.MsgCount, &s.HighWater, &closed, &s.Reason,
+			&s.CostUSD, &s.LLMCalls); err != nil {
 			return nil, err
 		}
 		s.Closed = closed == 1
@@ -180,16 +187,18 @@ func UpsertSegment(db *sql.DB, s *Segment) error {
 	}
 	_, err := db.Exec(`
 		INSERT INTO session_segments
-			(session_id, seq, start_id, end_id, start_uuid, end_uuid, summary, msg_count, high_water, closed, reason, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			(session_id, seq, start_id, end_id, start_uuid, end_uuid, summary, msg_count, high_water, closed, reason, updated_at,
+			 cost_usd, llm_calls)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(session_id, seq) DO UPDATE SET
 			start_id=excluded.start_id, end_id=excluded.end_id,
 			start_uuid=excluded.start_uuid, end_uuid=excluded.end_uuid,
 			summary=excluded.summary, msg_count=excluded.msg_count, high_water=excluded.high_water,
-			closed=excluded.closed, reason=excluded.reason, updated_at=excluded.updated_at`,
+			closed=excluded.closed, reason=excluded.reason, updated_at=excluded.updated_at,
+			cost_usd=excluded.cost_usd, llm_calls=excluded.llm_calls`,
 		s.SessionID, s.Seq, s.StartID, s.EndID, nullStr(s.StartUUID), nullStr(s.EndUUID),
 		nullStr(s.Summary), s.MsgCount, s.HighWater, closed, nullStr(s.Reason),
-		time.Now().UTC().Format(time.RFC3339))
+		time.Now().UTC().Format(time.RFC3339), s.CostUSD, s.LLMCalls)
 	return err
 }
 

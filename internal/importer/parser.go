@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/erwin/remaimber/internal/db"
 	"github.com/erwin/remaimber/internal/types"
 )
 
@@ -58,6 +59,10 @@ func ParseLine(sessionID string, line []byte) (*types.Message, error) {
 		m.ContentText = jl.CustomTitle
 	}
 	// progress, file-history-snapshot: content_text stays empty (not indexed)
+
+	// Classify shape once here, so every query can filter on an indexed column
+	// instead of pattern-matching the raw JSON at read time.
+	m.IsSidechain, m.IsCompactSummary, m.IsToolResult = db.ClassifyRaw(jl.Type, string(line))
 
 	return m, nil
 }

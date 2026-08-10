@@ -26,7 +26,7 @@ import (
 func ActivePathSet(db *sql.DB, sessionID string) (map[string]bool, error) {
 	rows, err := db.Query(`SELECT id, COALESCE(uuid,''), COALESCE(parent_uuid,'')
 		FROM messages
-		WHERE session_id = ? AND content_json NOT LIKE '%"isSidechain":true%'
+		WHERE session_id = ? AND is_sidechain = 0
 		ORDER BY id`, sessionID)
 	if err != nil {
 		return nil, err
@@ -97,7 +97,7 @@ type CompactionBoundary struct {
 // by id. The uuid lets callers drop boundaries abandoned by a rewind.
 func CompactionBoundaries(db *sql.DB, sessionID string) ([]CompactionBoundary, error) {
 	rows, err := db.Query(`SELECT id, COALESCE(uuid,'') FROM messages
-		WHERE session_id = ? AND content_json LIKE '%"isCompactSummary":true%'
+		WHERE session_id = ? AND is_compact_summary = 1
 		ORDER BY id`, sessionID)
 	if err != nil {
 		return nil, err

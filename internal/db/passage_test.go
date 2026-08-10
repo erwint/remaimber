@@ -319,3 +319,66 @@ func TestFindPassagesAcrossFilters(t *testing.T) {
 		t.Errorf("since-filter past the end returned %d passages", len(got))
 	}
 }
+
+// Asking for something states the topic more plainly than doing it ever does, so
+// without a work signal the conversation that merely requested work outranks the
+// one that carried it out.
+func TestFindPassagesPrefersWorkOverRequest(t *testing.T) {
+	database := testDB(t)
+	insertSession(t, database, &types.Session{SessionID: "ask", ProjectKey: "-p"})
+	insertSession(t, database, &types.Session{SessionID: "did", ProjectKey: "-p"})
+
+	base := time.Date(2026, 8, 6, 9, 0, 0, 0, time.UTC)
+	tx, _ := database.Begin()
+	i := 0
+	add := func(sid string, at time.Time, role, text string) {
+		if err := InsertMessage(tx, &types.Message{
+			SessionID: sid, UUID: fmt.Sprintf("w%d", i), Type: role, Role: role,
+			ContentText: text, ContentJSON: `{"type":"` + role + `"}`,
+			Timestamp: at.Format(time.RFC3339),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		i++
+	}
+	// The request: states the topic cleanly, several times, with no work in it.
+	for n := 0; n < 5; n++ {
+		add("ask", base.Add(time.Duration(n)*time.Minute), "user",
+			"can you set up the mail relay on the nas")
+		add("ask", base.Add(time.Duration(n)*time.Minute+30*time.Second), "assistant",
+			"I can set up the mail relay on the nas once you confirm.")
+	}
+	// The work: same topic, plus the residue of actually doing it.
+	for n := 0; n < 5; n++ {
+		add("did", base.Add(time.Duration(n)*time.Minute), "user",
+			"the mail relay on the nas is refusing connections")
+		add("did", base.Add(time.Duration(n)*time.Minute+30*time.Second), "assistant",
+			"Fixed the mail relay on the nas.\n```\n$ docker compose up -d postfix\n"+
+				"/etc/postfix/main.cf relayhost = [mail.example.net]:587\nstatus=sent (250 2.0.0)\n```")
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := FindPassagesAcross(database, "mail relay on the nas", PassageFilter{}, PassageOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) == 0 {
+		t.Fatal("no passages found")
+	}
+	if got[0].SessionID != "did" {
+		t.Errorf("best passage came from %q, want \"did\" — the request outranked the work",
+			got[0].SessionID)
+	}
+}
+
+func TestHasWorkEvidenceNeedsTwoMarkers(t *testing.T) {
+	// Prose about work, with a single incidental marker, is not evidence.
+	if hasWorkEvidence("we should probably update /etc/postfix/main.cf at some point") {
+		t.Error("a lone file path counted as work evidence")
+	}
+	if !hasWorkEvidence("```\n$ docker compose up -d\n/etc/postfix/main.cf\n```") {
+		t.Error("fenced commands plus a path should count as work evidence")
+	}
+}

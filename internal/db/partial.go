@@ -162,9 +162,9 @@ func SegmentMessages(db *sql.DB, sessionID string, seqs []int, since, until stri
 		  AND m.session_id = ?
 		  AND m.role IN ('user','assistant')
 		  AND COALESCE(m.content_text,'') != ''
-		  AND m.content_json NOT LIKE '%"isCompactSummary":true%'
-		  AND m.content_json NOT LIKE '%"isSidechain":true%'
-		  AND NOT (m.type = 'user' AND m.content_json LIKE '%"tool_result"%')
+		  AND m.is_compact_summary = 0
+		  AND m.is_sidechain = 0
+		  AND m.is_tool_result = 0
 		  AND (? = '' OR m.timestamp >= ?) AND (? = '' OR m.timestamp <= ?)
 		ORDER BY m.id`, args...)
 	if err != nil {

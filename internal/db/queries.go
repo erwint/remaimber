@@ -36,14 +36,46 @@ func UpsertSession(tx *sql.Tx, s *types.Session) error {
 
 // InsertMessage inserts a message, ignoring duplicates (by uuid or content_hash).
 func InsertMessage(tx *sql.Tx, m *types.Message) error {
+	// Classify shape once, at write time. Callers may not set these (tests,
+	// direct construction), so derive them from content_json when unset — the
+	// column must never be left NULL or the backfill would rescan on next open.
+	sidechain, compact, toolResult := m.IsSidechain, m.IsCompactSummary, m.IsToolResult
+	if !sidechain && !compact && !toolResult {
+		sidechain, compact, toolResult = ClassifyRaw(m.Type, m.ContentJSON)
+	}
 	_, err := tx.Exec(`
-		INSERT OR IGNORE INTO messages (session_id, uuid, parent_uuid, type, role, content_text, content_json, content_hash, timestamp)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT OR IGNORE INTO messages (session_id, uuid, parent_uuid, type, role, content_text, content_json, content_hash, timestamp,
+			is_sidechain, is_compact_summary, is_tool_result)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.SessionID, nullStr(m.UUID), nullStr(m.ParentUUID), m.Type, nullStr(m.Role),
 		nullStr(m.ContentText), m.ContentJSON, nullStr(m.ContentHash), nullStr(m.Timestamp),
+		boolInt(sidechain), boolInt(compact), boolInt(toolResult),
 	)
 	return err
 }
+
+// ClassifyRaw derives a message's shape from its raw JSON. The substring checks
+// mirror what the LIKE predicates used to do inline, kept in one place so the
+// import path and the migration backfill cannot drift apart.
+func ClassifyRaw(msgType, contentJSON string) (sidechain, compactSummary, toolResult bool) {
+	return strings.Contains(contentJSON, `"isSidechain":true`),
+		strings.Contains(contentJSON, `"isCompactSummary":true`),
+		msgType == "user" && strings.Contains(contentJSON, `"tool_result"`)
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// salientMessages is the predicate every content reader shares: real
+// conversation turns, no agent mechanics. Written against the indexed shape
+// columns rather than content_json, which is by far the largest column.
+const salientMessages = `role IN ('user','assistant')
+	AND COALESCE(content_text,'') != ''
+	AND is_sidechain = 0 AND is_compact_summary = 0 AND is_tool_result = 0`
 
 // GetSessionMeta retrieves file tracking metadata for a session.
 func GetSessionMeta(db *sql.DB, sessionID string) (mtime float64, size int64, offset int64, found bool, err error) {
@@ -214,7 +246,7 @@ func searchMessages(db *sql.DB, f SearchFilter, match string) ([]types.SearchRes
 		WHERE messages_fts MATCH ?`
 	args := []any{match}
 	if !f.IncludeToolOutput {
-		q += ` AND NOT (m.type = 'user' AND m.content_json LIKE '%"tool_result"%')`
+		q += ` AND m.is_tool_result = 0`
 	}
 	if f.ExcludeSession != "" {
 		q += ` AND m.session_id != ?`

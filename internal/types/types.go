@@ -57,6 +57,11 @@ type Message struct {
 	ContentJSON string `json:"content_json"`
 	ContentHash string `json:"-"`
 	Timestamp   string `json:"timestamp,omitempty"`
+	// Shape flags, lifted out of content_json at import so queries can filter on
+	// an index instead of scanning the largest column in the database.
+	IsSidechain      bool `json:"-"`
+	IsCompactSummary bool `json:"-"`
+	IsToolResult     bool `json:"-"`
 	// SegmentSeq is populated only when a message is loaded as part of a segment
 	// selection (a partial resume); zero otherwise.
 	SegmentSeq int `json:"segment_seq,omitempty"`

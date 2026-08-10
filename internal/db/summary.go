@@ -100,7 +100,7 @@ func MaxUAMessageID(db *sql.DB, sessionID string) (int64, error) {
 // one supersedes earlier ones. Returns ok=false if the session was never compacted.
 func LatestCompactSummary(db *sql.DB, sessionID string) (text string, id int64, ok bool) {
 	err := db.QueryRow(`SELECT id, COALESCE(content_text,'') FROM messages
-		WHERE session_id = ? AND content_json LIKE '%"isCompactSummary":true%'
+		WHERE session_id = ? AND is_compact_summary = 1
 		ORDER BY id DESC LIMIT 1`, sessionID).Scan(&id, &text)
 	if err != nil || text == "" {
 		return "", 0, false
@@ -145,7 +145,7 @@ func UserAssistantMessagesAfter(db *sql.DB, sessionID string, afterID int64) ([]
 		FROM messages
 		WHERE session_id = ? AND id > ? AND role IN ('user','assistant')
 		  AND COALESCE(content_text,'') != ''
-		  AND NOT (type = 'user' AND content_json LIKE '%"tool_result"%')
+		  AND is_tool_result = 0
 		ORDER BY id`,
 		summaryHeadCap+summaryTailCap, summaryHeadCap, summaryElision, summaryTailCap,
 		sessionID, afterID)
