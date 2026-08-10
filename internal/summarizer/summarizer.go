@@ -53,6 +53,10 @@ type Config struct {
 	// Caps bounds per-message text in rendered prompts. Zero value means
 	// DefaultTextCaps.
 	Caps TextCaps
+
+	// Cost, when set, accumulates what each call spent. Optional so callers that
+	// don't care about accounting are unaffected.
+	Cost *CostMeter
 }
 
 // caps returns the configured budgets, falling back to the defaults so a
@@ -615,7 +619,11 @@ func (c Config) completeClaude(ctx context.Context, system, user string) (string
 	ctx, cancel := context.WithTimeout(ctx, c.timeout())
 	defer cancel()
 
-	args := []string{"-p", "--no-session-persistence", "--append-system-prompt", system}
+	// --output-format json wraps the reply so the run's cost comes back with it.
+	// Cost is otherwise unrecoverable: --no-session-persistence leaves no
+	// transcript to price afterwards, so if it isn't taken here it is gone.
+	args := []string{"-p", "--no-session-persistence", "--output-format", "json",
+		"--append-system-prompt", system}
 	if c.Model != "" {
 		args = append(args, "--model", c.Model)
 	}
@@ -627,10 +635,56 @@ func (c Config) completeClaude(ctx context.Context, system, user string) (string
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("claude summarize: %w: %s", err, strings.TrimSpace(errb.String()))
 	}
-	return strings.TrimSpace(out.String()), nil
+
+	var res struct {
+		Result     string  `json:"result"`
+		TotalCost  float64 `json:"total_cost_usd"`
+		IsError    bool    `json:"is_error"`
+		NumTurns   int     `json:"num_turns"`
+		DurationMS int     `json:"duration_ms"`
+	}
+	raw := strings.TrimSpace(out.String())
+	if err := json.Unmarshal([]byte(raw), &res); err != nil {
+		// An older CLI without --output-format json returns bare text. Treat that
+		// as the answer rather than failing the summarization over accounting.
+		return raw, nil
+	}
+	if res.IsError {
+		return "", fmt.Errorf("claude summarize: %s", truncateErr(res.Result))
+	}
+	c.spend(res.TotalCost)
+	return strings.TrimSpace(res.Result), nil
 }
 
-// completeHTTP calls an OpenAI-compatible /chat/completions endpoint.
+// spend reports a call's cost to the collector, when one is attached. Kept off
+// the return path so every caller doesn't have to thread a cost it ignores.
+func (c Config) spend(usd float64) {
+	if c.Cost != nil && usd > 0 {
+		c.Cost.Add(usd)
+	}
+}
+
+func truncateErr(s string) string {
+	if len(s) > 300 {
+		return s[:300] + "…"
+	}
+	return s
+}
+
+// CostMeter accumulates what a run of summarization spent. Safe for the
+// sequential use the segmenter makes of it.
+type CostMeter struct {
+	USD   float64
+	Calls int
+}
+
+func (m *CostMeter) Add(usd float64) {
+	m.USD += usd
+	m.Calls++
+}
+
+// completeHTTP calls an OpenAI-compatible /chat/completions endpoint. No cost is
+// recorded: these are self-hosted endpoints with no per-call price to report.
 func (c Config) completeHTTP(ctx context.Context, system, user string) (string, error) {
 	if c.Model == "" {
 		return "", fmt.Errorf("REMAIMBER_LLM_MODEL is required for the HTTP backend")
@@ -681,4 +735,13 @@ func (c Config) completeHTTP(ctx context.Context, system, user string) (string, 
 		return "", fmt.Errorf("LLM returned no choices")
 	}
 	return strings.TrimSpace(parsed.Choices[0].Message.Content), nil
+}
+
+// Meter reports the running cost total, satisfying the segmenter's optional
+// cost-metered interface. Zero when no meter is attached.
+func (c Config) Meter() (usd float64, calls int) {
+	if c.Cost == nil {
+		return 0, 0
+	}
+	return c.Cost.USD, c.Cost.Calls
 }

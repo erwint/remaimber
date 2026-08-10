@@ -169,9 +169,9 @@ func findPassages(db *sql.DB, query string, f PassageFilter, opts PassageOpts) (
 	// turns, not turns, and would double-count whatever they describe.
 	q += `
 		WHERE messages_fts MATCH ?
-		  AND m.content_json NOT LIKE '%"isSidechain":true%'
-		  AND m.content_json NOT LIKE '%"isCompactSummary":true%'
-		  AND NOT (m.type = 'user' AND m.content_json LIKE '%"tool_result"%')`
+		  AND m.is_sidechain = 0
+		  AND m.is_compact_summary = 0
+		  AND m.is_tool_result = 0`
 	args := []any{strings.Join(quoted, " OR ")}
 	if f.SessionID != "" {
 		q += ` AND m.session_id = ?`
@@ -279,6 +279,16 @@ func findPassages(db *sql.DB, query string, f PassageFilter, opts PassageOpts) (
 		}
 		cov := float64(covered) / float64(len(terms))
 
+		// Prefer where the work happened over where it was asked for. Asking
+		// produces one strongly-matching sentence; doing produces commands, paths,
+		// config and output alongside it. Without this, a conversation that merely
+		// requested something outranks the one that carried it out, because the
+		// request states the topic more plainly than the work ever does.
+		evidence := 1.0
+		if hasWorkEvidence(blob) {
+			evidence = 1.35
+		}
+
 		best := g[0]
 		for _, h := range g {
 			if h.score > best.score {
@@ -292,7 +302,7 @@ func findPassages(db *sql.DB, query string, f PassageFilter, opts PassageOpts) (
 			StartedAt: g[0].ts,
 			EndedAt:   g[len(g)-1].ts,
 			Hits:      len(g),
-			Score:     strength * cov * cov,
+			Score:     strength * cov * cov * evidence,
 			Coverage:  cov,
 			Snippet:   strings.TrimSpace(strings.ReplaceAll(best.snippet, "\n", " ")),
 		})
@@ -322,6 +332,32 @@ func findPassages(db *sql.DB, query string, f PassageFilter, opts PassageOpts) (
 		}
 	}
 	return out, nil
+}
+
+// workMarkers are traces that something was actually done rather than merely
+// discussed: fenced code, shell prompts and redirects, file paths with
+// extensions, config assignments, and the shape of command output.
+var workMarkers = []*regexp.Regexp{
+	regexp.MustCompile("```"),
+	regexp.MustCompile(`(?m)^\s*\$ |\bsudo \b|\bdocker \b|\bsystemctl \b|\bgit \b`),
+	regexp.MustCompile(`/[\w.-]+/[\w.-]+\.\w{1,5}\b`),
+	regexp.MustCompile(`(?m)^\s*[\w.]+\s*=\s*\S`),
+	regexp.MustCompile(`\b(exit status|status=sent|HTTP/\d|\d{3} \w+ ESMTP)\b`),
+}
+
+// hasWorkEvidence reports whether a passage carries the residue of work being
+// carried out. Requires two independent markers: any one alone shows up in
+// ordinary prose about work, while two together rarely do.
+func hasWorkEvidence(blob string) bool {
+	n := 0
+	for _, re := range workMarkers {
+		if re.MatchString(blob) {
+			if n++; n >= 2 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // silenceBetween is the time between two messages, in either order; zero when
@@ -434,9 +470,9 @@ func PassageMessages(db *sql.DB, sessionID string, p Passage) ([]types.Message, 
 		WHERE session_id = ? AND id BETWEEN ? AND ?
 		  AND role IN ('user','assistant')
 		  AND COALESCE(content_text,'') != ''
-		  AND content_json NOT LIKE '%"isCompactSummary":true%'
-		  AND content_json NOT LIKE '%"isSidechain":true%'
-		  AND NOT (type = 'user' AND content_json LIKE '%"tool_result"%')
+		  AND is_compact_summary = 0
+		  AND is_sidechain = 0
+		  AND is_tool_result = 0
 		ORDER BY id`, sessionID, p.StartID, p.EndID)
 	if err != nil {
 		return nil, err

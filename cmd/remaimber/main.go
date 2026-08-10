@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -61,6 +62,10 @@ func newRootCmd() *cobra.Command {
   # See what a long session was about, without reading it
   remaimber summary b2bd8168`,
 		Version: fmt.Sprintf("%s (built: %s)", version, date),
+		// A failing command should print why, not reprint its own usage. The
+		// error already says what went wrong, and burying it under a flag list
+		// makes diagnostics harder to read, not easier.
+		SilenceUsage: true,
 	}
 
 	root.PersistentFlags().StringVar(&dbPath, "db", "", "Database path (default: ~/.claude/remaimber/remaimber.db, or REMAIMBER_DB env)")
@@ -82,6 +87,8 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(summaryCmd())
 	root.AddCommand(summarizeIfStaleCmd())
 	root.AddCommand(statsCmd())
+	root.AddCommand(doctorCmd())
+	root.AddCommand(recallCmd())
 	root.AddCommand(verifyCmd())
 	root.AddCommand(setupCmd())
 	root.AddCommand(mcpCmd())
@@ -1374,6 +1381,7 @@ func isLikelyLive(s *types.Session) bool {
 // message count has grown past the threshold.
 func summarizeCmd() *cobra.Command {
 	var minNew int
+	var all, reindex bool
 	cmd := &cobra.Command{
 		Use: "summarize [session-id]",
 		Example: `  # Summarize every session with enough new material
@@ -1385,18 +1393,41 @@ func summarizeCmd() *cobra.Command {
   # Only sessions with at least 20 new messages
   remaimber summarize --min 20
 
+  # Catch up everything, however little new material it has
+  remaimber summarize --all
+
+  # Rebuild the summary search index without calling a model
+  remaimber summarize --reindex
+
   # Use a local model instead of the claude CLI
   REMAIMBER_LLM=http://localhost:11434/v1 REMAIMBER_LLM_MODEL=qwen3 remaimber summarize`,
 		Short: "Generate or update rolling summaries of sessions",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg := summarizer.LoadConfig()
+			cfg.Cost = &summarizer.CostMeter{}
 
 			database, err := openDB()
 			if err != nil {
 				return err
 			}
 			defer database.Close()
+
+			// Reindexing is pure bookkeeping over summaries that already exist,
+			// so it costs nothing and is safe to run at any time.
+			if reindex {
+				n, err := db.ReindexSummaries(database)
+				if err != nil {
+					return err
+				}
+				fmt.Printf("Reindexed %d segment summaries.\n", n)
+				return nil
+			}
+			// --all lowers the bar to a single new message, so sessions that
+			// never crossed the threshold stop being permanently invisible.
+			if all {
+				minNew = 1
+			}
 
 			if len(args) == 1 {
 				sessionID, err := db.ResolveSessionID(database, args[0])
@@ -1428,6 +1459,8 @@ func summarizeCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().IntVar(&minNew, "min", 6, "Minimum new user/assistant messages before (re)summarizing")
+	cmd.Flags().BoolVar(&all, "all", false, "Summarize every session with any new material (implies --min 1)")
+	cmd.Flags().BoolVar(&reindex, "reindex", false, "Rebuild the summary search index from stored summaries; makes no model calls")
 	return cmd
 }
 
@@ -1546,6 +1579,7 @@ func summarizeIfStaleCmd() *cobra.Command {
 		Hidden: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg := summarizer.LoadConfig()
+			cfg.Cost = &summarizer.CostMeter{}
 			if !importer.ShouldSummarize() {
 				return nil
 			}
@@ -1590,6 +1624,27 @@ func statsCmd() *cobra.Command {
 			fmt.Printf("Sessions:  %d\n", sessionCount)
 			fmt.Printf("Messages:  %d\n", messageCount)
 			fmt.Printf("Projects:  %d\n", len(projects))
+
+			// Coverage decides whether recall can be trusted: an unsummarized
+			// session is invisible to every summary- and segment-based lookup.
+			if c, err := db.GetSummaryCoverage(database); err == nil {
+				fmt.Printf("\nSummaries:\n")
+				fmt.Printf("  Sessions summarized:  %d/%d (%s)\n",
+					c.SessionsWithSum, c.Sessions, pct(c.SessionsWithSum, c.Sessions))
+				fmt.Printf("  Segments summarized:  %d/%d (%s)\n",
+					c.SegmentsWithSum, c.Segments, pct(c.SegmentsWithSum, c.Segments))
+				fmt.Printf("  Indexed for search:   %d\n", c.IndexedSummaries)
+				if c.TotalLLMCalls > 0 {
+					fmt.Printf("  Cost so far:          $%.2f over %d model calls\n", c.TotalCostUSD, c.TotalLLMCalls)
+				} else {
+					fmt.Printf("  Cost so far:          not recorded (summarized before cost tracking)\n")
+				}
+				if c.SessionsWithSum < c.Sessions {
+					fmt.Printf("  %d unsummarized — run: remaimber summarize --all\n", c.Sessions-c.SessionsWithSum)
+				}
+			}
+
+			fmt.Printf("\nProjects:\n")
 			for _, p := range projects {
 				fmt.Printf("  - %s (%s)\n", p, importer.PrettyProjectName(p))
 			}
@@ -2178,4 +2233,183 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// pct renders a share as a percentage, reading "n/a" rather than "0%" when there
+// is nothing to divide by.
+func pct(n, total int) string {
+	if total == 0 {
+		return "n/a"
+	}
+	return fmt.Sprintf("%.0f%%", 100*float64(n)/float64(total))
+}
+
+// doctorCmd checks the things that fail quietly. Import and summarization run
+// from hooks, so when they stop running nothing reports an error — the archive
+// simply stops keeping up, and that is only noticed when a search comes back
+// wrong months later.
+func doctorCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "doctor",
+		Short: "Check that archiving, summarization and the index are healthy",
+		Example: `  # What is silently not working?
+  remaimber doctor`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			database, err := openDB()
+			if err != nil {
+				return err
+			}
+			defer database.Close()
+
+			var problems int
+			ok := func(format string, a ...any) { fmt.Printf("  ok    %s\n", fmt.Sprintf(format, a...)) }
+			warn := func(format string, a ...any) {
+				problems++
+				fmt.Printf("  WARN  %s\n", fmt.Sprintf(format, a...))
+			}
+
+			fmt.Println("Archiving")
+			if home, err := os.UserHomeDir(); err == nil {
+				hooksSeen := false
+				for _, p := range []string{
+					filepath.Join(home, ".claude", "settings.json"),
+					filepath.Join(home, ".claude", "settings.local.json"),
+				} {
+					if b, err := os.ReadFile(p); err == nil && strings.Contains(string(b), "remaimber") {
+						hooksSeen = true
+					}
+				}
+				// The plugin ships its own hooks, so absence from settings.json is
+				// only a problem if the plugin is not providing them either.
+				pluginHooks := false
+				if b, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json")); err == nil {
+					pluginHooks = strings.Contains(string(b), `"rmb@remaimber": true`)
+				}
+				switch {
+				case hooksSeen || pluginHooks:
+					ok("import hooks are configured")
+				default:
+					warn("no remaimber hooks found in settings.json and the plugin is not enabled — run: remaimber setup")
+				}
+			}
+
+			var lastImport string
+			database.QueryRow(`SELECT COALESCE(MAX(imported_at),'') FROM sessions`).Scan(&lastImport)
+			if lastImport == "" {
+				warn("nothing has ever been imported — run: remaimber import")
+			} else if t, err := time.Parse(time.RFC3339, lastImport); err == nil && time.Since(t) > 7*24*time.Hour {
+				warn("last import was %s (%.0f days ago) — hooks may not be running",
+					lastImport[:10], time.Since(t).Hours()/24)
+			} else {
+				ok("last import %s", lastImport[:min(len(lastImport), 16)])
+			}
+
+			fmt.Println("\nSummarization")
+			c, err := db.GetSummaryCoverage(database)
+			if err != nil {
+				return err
+			}
+			switch {
+			case c.Sessions == 0:
+				warn("no sessions archived yet")
+			case c.SessionsWithSum == c.Sessions:
+				ok("all %d sessions summarized", c.Sessions)
+			default:
+				warn("%d of %d sessions unsummarized — run: remaimber summarize --all",
+					c.Sessions-c.SessionsWithSum, c.Sessions)
+			}
+			if c.SegmentsWithSum > c.IndexedSummaries {
+				warn("%d summaries are not in the search index — run: remaimber summarize --reindex",
+					c.SegmentsWithSum-c.IndexedSummaries)
+			} else if c.IndexedSummaries > 0 {
+				ok("%d summaries indexed for intent-level search", c.IndexedSummaries)
+			}
+			if _, err := exec.LookPath("claude"); err != nil {
+				warn("the `claude` CLI is not on PATH; summarization will fail unless REMAIMBER_LLM points elsewhere")
+			} else {
+				ok("summarization backend available")
+			}
+
+			fmt.Println("\nIndex")
+			var unclassified int
+			database.QueryRow(`SELECT COUNT(*) FROM messages WHERE is_sidechain IS NULL`).Scan(&unclassified)
+			if unclassified > 0 {
+				warn("%d messages have no shape flags; reopen the database to backfill", unclassified)
+			} else {
+				ok("message flags fully populated")
+			}
+			res, err := db.Verify(database)
+			if err != nil {
+				return err
+			}
+			if !res.FTSMatch {
+				warn("full-text index out of step: %d messages but %d indexed — run: remaimber import --force",
+					res.MessageCount, res.FTSCount)
+			} else {
+				ok("full-text index consistent (%d rows)", res.FTSCount)
+			}
+			if res.DuplicateUUIDs > 0 {
+				warn("%d duplicate message uuids", res.DuplicateUUIDs)
+			}
+
+			fmt.Println()
+			if problems == 0 {
+				fmt.Println("No problems found.")
+				return nil
+			}
+			return fmt.Errorf("%d problem(s) found", problems)
+		},
+	}
+}
+
+// recallCmd searches segment summaries rather than raw messages — what the work
+// turned out to be, rather than the words someone happened to type.
+func recallCmd() *cobra.Command {
+	var limit int
+	var jsonOut bool
+	cmd := &cobra.Command{
+		Use:   "recall <topic>",
+		Short: "Search what conversations were about (segment summaries)",
+		Long: "Search segment summaries rather than raw message text.\n\n" +
+			"Summaries say what the work turned out to be, so this matches when you remember\n" +
+			"the outcome but not the wording. Use `search` for literal text.",
+		Example: `  # Match on outcome, not phrasing
+  remaimber recall 'smtp relay on the nas'
+
+  # More results, as JSON
+  remaimber recall 'flaky tests' --limit 10 --json`,
+		Args: cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			database, err := openDB()
+			if err != nil {
+				return err
+			}
+			defer database.Close()
+
+			hits, err := db.SearchSummaries(database, strings.Join(args, " "), limit)
+			if err != nil {
+				return err
+			}
+			if jsonOut {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				return enc.Encode(hits)
+			}
+			if len(hits) == 0 {
+				fmt.Println("Nothing recalled. Try `remaimber search` for literal text,")
+				fmt.Println("or check coverage with `remaimber stats`.")
+				return nil
+			}
+			for _, h := range hits {
+				fmt.Printf("%s seg %d  %s\n    %s\n\n", shortID(h.SessionID), h.Seq,
+					importer.PrettyProjectName(h.ProjectKey),
+					truncate(strings.ReplaceAll(h.Summary, "\n", " "), 150))
+			}
+			fmt.Printf("Pull one back:  remaimber resume <session-id> --segments <seq>\n")
+			return nil
+		},
+	}
+	cmd.Flags().IntVar(&limit, "limit", 20, "Max results")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output as JSON")
+	return cmd
 }

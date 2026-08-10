@@ -30,3 +30,7 @@ session id (first 8 chars), repo subpath or project, message count — and the
 **summary** as the description (fall back to the first prompt only when a session
 has no summary yet). If results span worktrees, note which is which via `cwd` /
 `worktree_root`.
+
+## If sessions look missing or summaries are stale
+
+`remaimber stats` reports summary coverage — an unsummarized session is invisible to `recall` and to segment lookups. `remaimber doctor` checks the things that fail quietly: hooks not firing, imports gone stale, summaries missing from the search index. Suggest `remaimber summarize --all` to catch up, or `remaimber summarize --reindex` when summaries exist but aren't searchable (that one makes no model calls).

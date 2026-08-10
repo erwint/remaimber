@@ -101,18 +101,34 @@ func Reconcile(ctx context.Context, llm LLM, database *sql.DB, sessionID, goal s
 			(onPath == nil || onPath[stored[i].EndUUID]) {
 			prev, fromHW = stored[i].Summary, stored[i].HighWater
 		}
+		// Meter each segment separately: cost then attributes to the part of the
+		// conversation that caused it, and a frozen segment keeps the price it
+		// was summarized at rather than having it re-attributed later.
+		before := meterReading(llm)
 		summary, err := foldSegment(ctx, llm, prev, spanMsgs, fromHW)
 		if err != nil {
 			return "", 0, err
 		}
+		spentUSD, spentCalls := meterDelta(llm, before)
 		seg := db.Segment{
 			SessionID: sessionID, Seq: i,
 			StartID: span.StartID, EndID: span.EndID,
 			StartUUID: span.StartUUID, EndUUID: span.EndUUID,
 			Summary: summary, MsgCount: span.Count, HighWater: span.EndID,
 			Closed: span.Closed, Reason: span.Reason,
+			CostUSD: spentUSD, LLMCalls: spentCalls,
+		}
+		// A re-fold of an open segment adds to what it already cost.
+		if i < len(stored) {
+			seg.CostUSD += stored[i].CostUSD
+			seg.LLMCalls += stored[i].LLMCalls
 		}
 		if err := db.UpsertSegment(database, &seg); err != nil {
+			return "", 0, err
+		}
+		// Keep the summary index in step with the summary itself, so intent-level
+		// search never lags behind what has been summarized.
+		if err := db.IndexSegmentSummary(database, sessionID, i, summary); err != nil {
 			return "", 0, err
 		}
 		segs = append(segs, seg)
@@ -168,4 +184,23 @@ func foldSegment(ctx context.Context, llm LLM, prev string, spanMsgs []types.Mes
 		}
 	}
 	return summarizer.StripEphemeral(prev), nil
+}
+
+// meterReading and meterDelta read the optional cost meter off an LLM without
+// requiring every implementation (notably the test fakes) to provide one.
+type costMetered interface {
+	Meter() (usd float64, calls int)
+}
+
+func meterReading(llm LLM) [2]float64 {
+	if m, ok := llm.(costMetered); ok {
+		usd, calls := m.Meter()
+		return [2]float64{usd, float64(calls)}
+	}
+	return [2]float64{}
+}
+
+func meterDelta(llm LLM, before [2]float64) (float64, int) {
+	after := meterReading(llm)
+	return after[0] - before[0], int(after[1] - before[1])
 }
