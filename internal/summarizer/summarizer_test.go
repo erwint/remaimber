@@ -428,3 +428,35 @@ func TestCompleteHTTPErrorStatus(t *testing.T) {
 		t.Error("expected error on non-200 status")
 	}
 }
+
+// There is no built-in price table: the claude backend is handed its own cost,
+// and an HTTP endpoint is one the operator chose and can rate themselves.
+func TestTokenPriceFromEnv(t *testing.T) {
+	t.Setenv("REMAIMBER_LLM_PRICE", "")
+	if p := LoadConfig().Price; p.InputPerMTok != 0 || p.OutputPerMTok != 0 {
+		t.Errorf("unset price = %+v, want zero (self-hosted models are free)", p)
+	}
+
+	t.Setenv("REMAIMBER_LLM_PRICE", "0.5, 1.5")
+	p := LoadConfig().Price
+	if p.InputPerMTok != 0.5 || p.OutputPerMTok != 1.5 {
+		t.Fatalf("price = %+v, want 0.5/1.5 (spaces tolerated)", p)
+	}
+	// 1M in + 1M out at those rates is exactly $2.
+	if got := p.cost(1_000_000, 1_000_000); got != 2.0 {
+		t.Errorf("cost(1M,1M) = %v, want 2.0", got)
+	}
+	if got := p.cost(0, 0); got != 0 {
+		t.Errorf("cost(0,0) = %v, want 0", got)
+	}
+
+	// A free endpoint prices to zero rather than erroring.
+	if got := (TokenPrice{}).cost(500_000, 500_000); got != 0 {
+		t.Errorf("unpriced endpoint = %v, want 0", got)
+	}
+
+	t.Setenv("REMAIMBER_LLM_PRICE", "junk")
+	if p := LoadConfig().Price; p.InputPerMTok != 0 {
+		t.Errorf("unparseable price should stay zero, got %+v", p)
+	}
+}

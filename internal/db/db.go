@@ -134,6 +134,10 @@ var migrations = []string{
 	// afterwards rather than only reconstructable from message volume.
 	`ALTER TABLE session_segments ADD COLUMN cost_usd REAL`,
 	`ALTER TABLE session_segments ADD COLUMN llm_calls INTEGER DEFAULT 0`,
+	// Which backend produced the summary. Without it, a zero cost is ambiguous:
+	// it could mean a self-hosted model that is free, or a summary written before
+	// cost tracking existed. Those need telling apart in any report.
+	`ALTER TABLE session_segments ADD COLUMN model TEXT`,
 }
 
 // postMigrations run after the column migrations, once the columns exist.
