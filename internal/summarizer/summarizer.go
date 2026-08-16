@@ -57,6 +57,28 @@ type Config struct {
 	// Cost, when set, accumulates what each call spent. Optional so callers that
 	// don't care about accounting are unaffected.
 	Cost *CostMeter
+
+	// Price rates an OpenAI-compatible endpoint's tokens. Zero means free, which
+	// is correct for a self-hosted model and wrong for a paid one — see
+	// REMAIMBER_LLM_PRICE.
+	Price TokenPrice
+}
+
+// TokenPrice is USD per million tokens for an OpenAI-compatible endpoint.
+//
+// There is deliberately no built-in price table. For the claude backend the CLI
+// reports the actual charge, which already accounts for cache reads, the model
+// that really ran, and any plan-specific rate — a local table could only ever
+// approximate a number we are handed exactly. For the HTTP backend the endpoint
+// is one the operator chose, so they can state its two rates; a table keyed by
+// model name would mostly miss, since providers rename models freely.
+type TokenPrice struct {
+	InputPerMTok  float64
+	OutputPerMTok float64
+}
+
+func (p TokenPrice) cost(inTok, outTok int) float64 {
+	return (float64(inTok)*p.InputPerMTok + float64(outTok)*p.OutputPerMTok) / 1e6
 }
 
 // caps returns the configured budgets, falling back to the defaults so a
@@ -93,6 +115,11 @@ func parseCap(s string) (head, tail int, ok bool) {
 //	REMAIMBER_LLM_MODEL     model name (default "haiku" for the claude backend)
 //	REMAIMBER_LLM_KEY       optional bearer token for the HTTP backend
 //	REMAIMBER_LLM_TIMEOUT   per-call timeout in seconds (default 300)
+//	REMAIMBER_LLM_PRICE     "input,output" USD per million tokens for the HTTP
+//	                        backend (e.g. "0.5,1.5"). Unset means free, which is
+//	                        right for a self-hosted model and wrong for a paid
+//	                        endpoint. The claude backend ignores it — the CLI
+//	                        reports its own cost.
 //	REMAIMBER_LLM_WINDOW    messages folded per call (default 40)
 //
 // Per-message text budgets, each "head" or "head,tail" in runes (see TextCaps):
@@ -126,6 +153,16 @@ func LoadConfig() Config {
 			c.Window = n
 		}
 	}
+	if s := os.Getenv("REMAIMBER_LLM_PRICE"); s != "" {
+		inS, outS, _ := strings.Cut(s, ",")
+		if v, err := strconv.ParseFloat(strings.TrimSpace(inS), 64); err == nil && v >= 0 {
+			c.Price.InputPerMTok = v
+		}
+		if v, err := strconv.ParseFloat(strings.TrimSpace(outS), 64); err == nil && v >= 0 {
+			c.Price.OutputPerMTok = v
+		}
+	}
+
 	c.CompactMode = os.Getenv("REMAIMBER_COMPACT_MODE")
 	if c.CompactMode == "" {
 		c.CompactMode = "anchor"
@@ -656,12 +693,29 @@ func (c Config) completeClaude(ctx context.Context, system, user string) (string
 	return strings.TrimSpace(res.Result), nil
 }
 
-// spend reports a call's cost to the collector, when one is attached. Kept off
-// the return path so every caller doesn't have to thread a cost it ignores.
+// spend records one completed call against the collector, when one is attached.
+// The call is always counted and the cost may be zero: a self-hosted model has no
+// price but the work still happened, and a call count that silently omitted local
+// runs would make a local setup look idle rather than free.
 func (c Config) spend(usd float64) {
-	if c.Cost != nil && usd > 0 {
-		c.Cost.Add(usd)
+	if c.Cost != nil {
+		c.Cost.Add(usd, c.modelName())
 	}
+}
+
+// modelName identifies what produced a summary, so free and unpriced can be told
+// apart later rather than both appearing as an absent cost.
+func (c Config) modelName() string {
+	if c.IsHTTP() {
+		if c.Model != "" {
+			return "local:" + c.Model
+		}
+		return "local"
+	}
+	if c.Model != "" {
+		return c.Model
+	}
+	return "claude"
 }
 
 func truncateErr(s string) string {
@@ -671,16 +725,20 @@ func truncateErr(s string) string {
 	return s
 }
 
-// CostMeter accumulates what a run of summarization spent. Safe for the
-// sequential use the segmenter makes of it.
+// CostMeter accumulates what a run of summarization spent, and what produced it.
+// Safe for the sequential use the segmenter makes of it.
 type CostMeter struct {
 	USD   float64
 	Calls int
+	Model string // last backend used; segments are summarized by one at a time
 }
 
-func (m *CostMeter) Add(usd float64) {
+func (m *CostMeter) Add(usd float64, model string) {
 	m.USD += usd
 	m.Calls++
+	if model != "" {
+		m.Model = model
+	}
 }
 
 // completeHTTP calls an OpenAI-compatible /chat/completions endpoint. No cost is
@@ -727,6 +785,10 @@ func (c Config) completeHTTP(ctx context.Context, system, user string) (string, 
 				Content string `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+		} `json:"usage"`
 	}
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return "", fmt.Errorf("decode LLM response: %w", err)
@@ -734,14 +796,20 @@ func (c Config) completeHTTP(ctx context.Context, system, user string) (string, 
 	if len(parsed.Choices) == 0 {
 		return "", fmt.Errorf("LLM returned no choices")
 	}
+	// Price the call from the token counts the endpoint reports. Self-hosted
+	// models have no price and record zero — the call is still counted, so a
+	// local setup reads as free rather than idle. A *paid* OpenAI-compatible
+	// endpoint is the case that needs a rate: without one it would silently
+	// report $0.00, which is worse than reporting nothing.
+	c.spend(c.Price.cost(parsed.Usage.PromptTokens, parsed.Usage.CompletionTokens))
 	return strings.TrimSpace(parsed.Choices[0].Message.Content), nil
 }
 
-// Meter reports the running cost total, satisfying the segmenter's optional
-// cost-metered interface. Zero when no meter is attached.
-func (c Config) Meter() (usd float64, calls int) {
+// Meter reports the running totals and the backend in use, satisfying the
+// segmenter's optional cost-metered interface. Zero when no meter is attached.
+func (c Config) Meter() (usd float64, calls int, model string) {
 	if c.Cost == nil {
-		return 0, 0
+		return 0, 0, ""
 	}
-	return c.Cost.USD, c.Cost.Calls
+	return c.Cost.USD, c.Cost.Calls, c.Cost.Model
 }

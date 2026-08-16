@@ -13,15 +13,20 @@ import (
 // CostTotals is the whole-archive picture, plus the span it was accrued over so
 // a rate can be derived rather than guessed.
 type CostTotals struct {
-	USD       float64 `json:"usd"`
-	Calls     int     `json:"llm_calls"`
-	Segments  int     `json:"segments"`
-	FirstDay  string  `json:"first_day,omitempty"`
-	LastDay   string  `json:"last_day,omitempty"`
-	DaysSpan  int     `json:"days_span"`
-	PerDay    float64 `json:"usd_per_day"`
-	PerCall   float64 `json:"usd_per_call"`
-	Projected float64 `json:"usd_per_30_days"`
+	USD      float64 `json:"usd"`
+	Calls    int     `json:"llm_calls"`
+	Segments int     `json:"segments"`
+	// A self-hosted model has no price, so its segments are counted separately
+	// rather than folded into a dollar total they cannot contribute to. Reporting
+	// "$0.00" for a local setup is right; reporting nothing at all is not.
+	FreeSegments int     `json:"free_segments"`
+	FreeCalls    int     `json:"free_llm_calls"`
+	FirstDay     string  `json:"first_day,omitempty"`
+	LastDay      string  `json:"last_day,omitempty"`
+	DaysSpan     int     `json:"days_span"`
+	PerDay       float64 `json:"usd_per_day"`
+	PerCall      float64 `json:"usd_per_call"`
+	Projected    float64 `json:"usd_per_30_days"`
 }
 
 // CostRow is one line of a breakdown, whatever it is grouped by.
@@ -38,9 +43,17 @@ type CostRow struct {
 // rather than being diluted by rows that could never have a price.
 func GetCostTotals(db *sql.DB, since, until string) (CostTotals, error) {
 	var t CostTotals
-	q := `SELECT COALESCE(SUM(cost_usd),0), COALESCE(SUM(llm_calls),0), COUNT(*),
+	// Any segment with recorded calls has been metered, whether or not it cost
+	// anything. Keying on cost alone made a self-hosted setup indistinguishable
+	// from one that had never summarized at all.
+	q := `SELECT
+			COALESCE(SUM(cost_usd),0),
+			COALESCE(SUM(llm_calls),0),
+			COUNT(*),
+			COALESCE(SUM(CASE WHEN COALESCE(cost_usd,0) = 0 THEN 1 ELSE 0 END),0),
+			COALESCE(SUM(CASE WHEN COALESCE(cost_usd,0) = 0 THEN llm_calls ELSE 0 END),0),
 			COALESCE(MIN(substr(updated_at,1,10)),''), COALESCE(MAX(substr(updated_at,1,10)),'')
-		FROM session_segments WHERE COALESCE(cost_usd,0) > 0`
+		FROM session_segments WHERE COALESCE(llm_calls,0) > 0`
 	args := []any{}
 	if since != "" {
 		q += ` AND substr(updated_at,1,10) >= ?`
@@ -50,7 +63,8 @@ func GetCostTotals(db *sql.DB, since, until string) (CostTotals, error) {
 		q += ` AND substr(updated_at,1,10) <= ?`
 		args = append(args, until)
 	}
-	if err := db.QueryRow(q, args...).Scan(&t.USD, &t.Calls, &t.Segments, &t.FirstDay, &t.LastDay); err != nil {
+	if err := db.QueryRow(q, args...).Scan(&t.USD, &t.Calls, &t.Segments,
+		&t.FreeSegments, &t.FreeCalls, &t.FirstDay, &t.LastDay); err != nil {
 		return t, err
 	}
 
@@ -77,6 +91,7 @@ const (
 	CostByDay     CostDimension = "day"
 	CostBySession CostDimension = "session"
 	CostByProject CostDimension = "project"
+	CostByModel   CostDimension = "model"
 )
 
 // GetCostBreakdown groups recorded spend along one dimension, largest first —
@@ -90,8 +105,10 @@ func GetCostBreakdown(db *sql.DB, by CostDimension, since, until string, limit i
 		keyExpr, labelExpr, order = `g.session_id`, `COALESCE(s.project_key,'')`, `usd DESC`
 	case CostByProject:
 		keyExpr, labelExpr, order = `COALESCE(s.project_key,'(unknown)')`, `''`, `usd DESC`
+	case CostByModel:
+		keyExpr, labelExpr, order = `COALESCE(NULLIF(g.model,''),'(unrecorded)')`, `''`, `usd DESC`
 	default:
-		return nil, fmt.Errorf("unknown breakdown %q: want day, session or project", by)
+		return nil, fmt.Errorf("unknown breakdown %q: want day, session, project or model", by)
 	}
 
 	q := `SELECT ` + keyExpr + ` AS key, ` + labelExpr + ` AS label,
@@ -99,7 +116,7 @@ func GetCostBreakdown(db *sql.DB, by CostDimension, since, until string, limit i
 			COALESCE(SUM(g.cost_usd),0) AS usd
 		FROM session_segments g
 		LEFT JOIN sessions s ON s.session_id = g.session_id
-		WHERE COALESCE(g.cost_usd,0) > 0`
+		WHERE COALESCE(g.llm_calls,0) > 0`
 	args := []any{}
 	if since != "" {
 		q += ` AND substr(g.updated_at,1,10) >= ?`
@@ -132,12 +149,12 @@ func GetCostBreakdown(db *sql.DB, by CostDimension, since, until string, limit i
 	return out, rows.Err()
 }
 
-// UnpricedSegments counts summaries written before cost tracking existed. They
-// are why a total can look smaller than the work behind it, and saying so is
-// better than letting the number quietly understate.
+// UnpricedSegments counts summaries with no metering at all — written before
+// cost tracking existed. Distinct from free segments, which were metered and
+// genuinely cost nothing; conflating the two either overstates a gap or hides one.
 func UnpricedSegments(db *sql.DB) (int, error) {
 	var n int
 	err := db.QueryRow(`SELECT COUNT(*) FROM session_segments
-		WHERE COALESCE(summary,'') != '' AND COALESCE(cost_usd,0) = 0`).Scan(&n)
+		WHERE COALESCE(summary,'') != '' AND COALESCE(llm_calls,0) = 0`).Scan(&n)
 	return n, err
 }

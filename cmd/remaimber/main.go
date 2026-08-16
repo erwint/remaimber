@@ -2484,8 +2484,24 @@ func costCmd() *cobra.Command {
 				return jsonOut2(totals)
 			}
 			if totals.Segments == 0 {
-				fmt.Println("No cost recorded yet.")
-				fmt.Println("Summaries written before cost tracking carry no price; new ones will.")
+				fmt.Println("No summarization recorded yet.")
+				fmt.Println("Summaries written before cost tracking carry no figures; new ones will.")
+				return nil
+			}
+
+			// A self-hosted backend produces real work at no price. Reporting a
+			// rate and a projection for it would be dressing up zero as a finding.
+			if totals.USD == 0 {
+				fmt.Printf("Summarization cost\n")
+				fmt.Printf("  Total:      $0.00 — every summary ran on a self-hosted model\n")
+				fmt.Printf("  Work done:  %d model calls over %d segments\n", totals.Calls, totals.Segments)
+				fmt.Printf("  Period:     %s to %s (%d days, %.0f calls/day)\n",
+					totals.FirstDay, totals.LastDay, totals.DaysSpan,
+					float64(totals.Calls)/float64(totals.DaysSpan))
+				if rows, err := db.GetCostBreakdown(database, db.CostByModel, since, until, 0); err == nil && len(rows) > 0 {
+					fmt.Printf("\nBy model\n")
+					printCostRows(db.CostByModel, rows, totals)
+				}
 				return nil
 			}
 
@@ -2495,10 +2511,16 @@ func costCmd() *cobra.Command {
 			fmt.Printf("  Period:     %s to %s (%d days)\n", totals.FirstDay, totals.LastDay, totals.DaysSpan)
 			fmt.Printf("  Rate:       $%.2f/day  ·  $%.4f/call\n", totals.PerDay, totals.PerCall)
 			fmt.Printf("  At this rate: ~$%.0f per 30 days\n", totals.Projected)
+			// A mixed setup would otherwise show a rate that quietly averages paid
+			// work with free work, understating what the paid backend costs.
+			if totals.FreeSegments > 0 {
+				fmt.Printf("  Free:       %d of %d segments ran on a self-hosted model (%d calls, no charge)\n",
+					totals.FreeSegments, totals.Segments, totals.FreeCalls)
+			}
 
 			if n, err := db.UnpricedSegments(database); err == nil && n > 0 {
-				fmt.Printf("\n  %d earlier segment(s) carry no price (summarized before cost tracking),\n", n)
-				fmt.Printf("  so the total covers only what has been measured.\n")
+				fmt.Printf("\n  %d earlier segment(s) were never metered (summarized before cost\n", n)
+				fmt.Printf("  tracking), so the total covers only what has been measured.\n")
 			}
 
 			days, err := db.GetCostBreakdown(database, db.CostByDay, since, until, 0)
@@ -2521,7 +2543,7 @@ func costCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&by, "by", "", "Break down by: day, session, or project")
+	cmd.Flags().StringVar(&by, "by", "", "Break down by: day, session, project, or model")
 	cmd.Flags().StringVar(&since, "since", "", "Only spend on or after this date (YYYY-MM-DD)")
 	cmd.Flags().StringVar(&until, "until", "", "Only spend on or before this date (YYYY-MM-DD)")
 	cmd.Flags().IntVar(&limit, "limit", 20, "Max rows in a breakdown (0 = all)")
@@ -2553,6 +2575,9 @@ func printCostRows(by db.CostDimension, rows []db.CostRow, totals db.CostTotals)
 		} else if by == db.CostByProject {
 			label = importer.PrettyProjectName(r.Key)
 			key = ""
+		} else if by == db.CostByModel {
+			label = r.Key
+			key = ""
 		}
 		bar := ""
 		if max > 0 {
@@ -2562,7 +2587,7 @@ func printCostRows(by db.CostDimension, rows []db.CostRow, totals db.CostTotals)
 		switch by {
 		case db.CostByDay:
 			fmt.Printf("  %-10s %s  $%6.2f  %3d calls\n", r.Key, bar, r.USD, r.Calls)
-		case db.CostByProject:
+		case db.CostByProject, db.CostByModel:
 			fmt.Printf("  %s  $%6.2f  %3d calls  %s\n", bar, r.USD, r.Calls, label)
 		default:
 			fmt.Printf("  %-8s %s  $%6.2f  %3d calls  %s\n", key, bar, r.USD, r.Calls, label)

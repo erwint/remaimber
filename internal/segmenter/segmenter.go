@@ -109,19 +109,22 @@ func Reconcile(ctx context.Context, llm LLM, database *sql.DB, sessionID, goal s
 		if err != nil {
 			return "", 0, err
 		}
-		spentUSD, spentCalls := meterDelta(llm, before)
+		spentUSD, spentCalls, usedModel := meterDelta(llm, before)
 		seg := db.Segment{
 			SessionID: sessionID, Seq: i,
 			StartID: span.StartID, EndID: span.EndID,
 			StartUUID: span.StartUUID, EndUUID: span.EndUUID,
 			Summary: summary, MsgCount: span.Count, HighWater: span.EndID,
 			Closed: span.Closed, Reason: span.Reason,
-			CostUSD: spentUSD, LLMCalls: spentCalls,
+			CostUSD: spentUSD, LLMCalls: spentCalls, Model: usedModel,
 		}
 		// A re-fold of an open segment adds to what it already cost.
 		if i < len(stored) {
 			seg.CostUSD += stored[i].CostUSD
 			seg.LLMCalls += stored[i].LLMCalls
+			if seg.Model == "" {
+				seg.Model = stored[i].Model
+			}
 		}
 		if err := db.UpsertSegment(database, &seg); err != nil {
 			return "", 0, err
@@ -189,18 +192,24 @@ func foldSegment(ctx context.Context, llm LLM, prev string, spanMsgs []types.Mes
 // meterReading and meterDelta read the optional cost meter off an LLM without
 // requiring every implementation (notably the test fakes) to provide one.
 type costMetered interface {
-	Meter() (usd float64, calls int)
+	Meter() (usd float64, calls int, model string)
 }
 
-func meterReading(llm LLM) [2]float64 {
+type reading struct {
+	usd   float64
+	calls int
+	model string
+}
+
+func meterReading(llm LLM) reading {
 	if m, ok := llm.(costMetered); ok {
-		usd, calls := m.Meter()
-		return [2]float64{usd, float64(calls)}
+		usd, calls, model := m.Meter()
+		return reading{usd, calls, model}
 	}
-	return [2]float64{}
+	return reading{}
 }
 
-func meterDelta(llm LLM, before [2]float64) (float64, int) {
+func meterDelta(llm LLM, before reading) (float64, int, string) {
 	after := meterReading(llm)
-	return after[0] - before[0], int(after[1] - before[1])
+	return after.usd - before.usd, after.calls - before.calls, after.model
 }
