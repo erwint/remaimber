@@ -87,6 +87,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(summaryCmd())
 	root.AddCommand(summarizeIfStaleCmd())
 	root.AddCommand(statsCmd())
+	root.AddCommand(costCmd())
 	root.AddCommand(doctorCmd())
 	root.AddCommand(recallCmd())
 	root.AddCommand(verifyCmd())
@@ -2424,4 +2425,154 @@ func recallCmd() *cobra.Command {
 	cmd.Flags().IntVar(&limit, "limit", 20, "Max results")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output as JSON")
 	return cmd
+}
+
+// costCmd answers what summarization has cost. The figure exists only because
+// each call's price is captured as it happens — there is no transcript to price
+// afterwards — so this is the only place it can be read.
+func costCmd() *cobra.Command {
+	var by, since, until string
+	var limit int
+	var jsonOut bool
+	cmd := &cobra.Command{
+		Use:   "cost",
+		Short: "Show what summarization has cost",
+		Long: "Show what summarization has cost.\n\n" +
+			"Cost is recorded per segment as it is summarized. Segments summarized before\n" +
+			"cost tracking existed carry no price and are excluded, so rates reflect what was\n" +
+			"actually measured.",
+		Example: `  # Overall spend, recent days, and the priciest conversations
+  remaimber cost
+
+  # One breakdown at a time
+  remaimber cost --by day
+  remaimber cost --by session --limit 10
+  remaimber cost --by project
+
+  # A specific window, or machine-readable
+  remaimber cost --since 2026-08-11 --until 2026-08-14
+  remaimber cost --by day --json`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			database, err := openDB()
+			if err != nil {
+				return err
+			}
+			defer database.Close()
+
+			totals, err := db.GetCostTotals(database, since, until)
+			if err != nil {
+				return err
+			}
+
+			if by != "" {
+				rows, err := db.GetCostBreakdown(database, db.CostDimension(by), since, until, limit)
+				if err != nil {
+					return err
+				}
+				if jsonOut {
+					return jsonOut2(struct {
+						Totals db.CostTotals `json:"totals"`
+						By     string        `json:"by"`
+						Rows   []db.CostRow  `json:"rows"`
+					}{totals, by, rows})
+				}
+				printCostRows(db.CostDimension(by), rows, totals)
+				return nil
+			}
+
+			if jsonOut {
+				return jsonOut2(totals)
+			}
+			if totals.Segments == 0 {
+				fmt.Println("No cost recorded yet.")
+				fmt.Println("Summaries written before cost tracking carry no price; new ones will.")
+				return nil
+			}
+
+			fmt.Printf("Summarization cost\n")
+			fmt.Printf("  Total:      $%.2f over %d model calls (%d segments)\n",
+				totals.USD, totals.Calls, totals.Segments)
+			fmt.Printf("  Period:     %s to %s (%d days)\n", totals.FirstDay, totals.LastDay, totals.DaysSpan)
+			fmt.Printf("  Rate:       $%.2f/day  ·  $%.4f/call\n", totals.PerDay, totals.PerCall)
+			fmt.Printf("  At this rate: ~$%.0f per 30 days\n", totals.Projected)
+
+			if n, err := db.UnpricedSegments(database); err == nil && n > 0 {
+				fmt.Printf("\n  %d earlier segment(s) carry no price (summarized before cost tracking),\n", n)
+				fmt.Printf("  so the total covers only what has been measured.\n")
+			}
+
+			days, err := db.GetCostBreakdown(database, db.CostByDay, since, until, 0)
+			if err != nil {
+				return err
+			}
+			if len(days) > 1 {
+				fmt.Printf("\nBy day\n")
+				printCostRows(db.CostByDay, tailRows(days, 14), totals)
+			}
+			sessions, err := db.GetCostBreakdown(database, db.CostBySession, since, until, 5)
+			if err != nil {
+				return err
+			}
+			if len(sessions) > 0 {
+				fmt.Printf("\nTop conversations\n")
+				printCostRows(db.CostBySession, sessions, totals)
+			}
+			fmt.Printf("\nBreak it down:  remaimber cost --by day|session|project\n")
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&by, "by", "", "Break down by: day, session, or project")
+	cmd.Flags().StringVar(&since, "since", "", "Only spend on or after this date (YYYY-MM-DD)")
+	cmd.Flags().StringVar(&until, "until", "", "Only spend on or before this date (YYYY-MM-DD)")
+	cmd.Flags().IntVar(&limit, "limit", 20, "Max rows in a breakdown (0 = all)")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output as JSON")
+	return cmd
+}
+
+func tailRows(rows []db.CostRow, n int) []db.CostRow {
+	if len(rows) <= n {
+		return rows
+	}
+	return rows[len(rows)-n:]
+}
+
+// printCostRows renders a breakdown with a proportion bar, so the row that
+// dominates spend is visible without reading the numbers.
+func printCostRows(by db.CostDimension, rows []db.CostRow, totals db.CostTotals) {
+	var max float64
+	for _, r := range rows {
+		if r.USD > max {
+			max = r.USD
+		}
+	}
+	for _, r := range rows {
+		key, label := r.Key, r.Label
+		if by == db.CostBySession {
+			key = shortID(key)
+			label = importer.PrettyProjectName(label)
+		} else if by == db.CostByProject {
+			label = importer.PrettyProjectName(r.Key)
+			key = ""
+		}
+		bar := ""
+		if max > 0 {
+			n := int(12 * r.USD / max)
+			bar = strings.Repeat("█", n) + strings.Repeat("·", 12-n)
+		}
+		switch by {
+		case db.CostByDay:
+			fmt.Printf("  %-10s %s  $%6.2f  %3d calls\n", r.Key, bar, r.USD, r.Calls)
+		case db.CostByProject:
+			fmt.Printf("  %s  $%6.2f  %3d calls  %s\n", bar, r.USD, r.Calls, label)
+		default:
+			fmt.Printf("  %-8s %s  $%6.2f  %3d calls  %s\n", key, bar, r.USD, r.Calls, label)
+		}
+	}
+}
+
+// jsonOut2 writes v as indented JSON to stdout.
+func jsonOut2(v any) error {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(v)
 }
