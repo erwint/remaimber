@@ -437,12 +437,14 @@ func listCmd() *cobra.Command {
 				}
 				// Only non-default agents are tagged: in an archive that is mostly
 				// Claude Code, marking every row "claude" is noise.
-				agent := ""
+				// Tag the project, not the label: appended to the label it reads
+				// as part of what the user typed.
+				project := importer.PrettyProjectName(s.ProjectKey)
 				if s.Agent != "" && s.Agent != importer.AgentClaude {
-					agent = " (" + s.Agent + ")"
+					project += " " + s.Agent
 				}
-				fmt.Printf("%s %-36s  %-20s  %s%s  [%d msgs]\n",
-					resumable, s.SessionID, importer.PrettyProjectName(s.ProjectKey), label, agent, s.MessageCount)
+				fmt.Printf("%s %-36s  %-20s  %s  [%d msgs]\n",
+					resumable, s.SessionID, project, label, s.MessageCount)
 				if loc := sessionLocation(s); loc != "" {
 					fmt.Printf("    %s\n", loc)
 				}
