@@ -12,8 +12,9 @@ import (
 func UpsertSession(tx *sql.Tx, s *types.Session) error {
 	_, err := tx.Exec(`
 		INSERT INTO sessions (session_id, project_key, project_path, custom_title, first_prompt,
-			git_branch, cwd, started_at, ended_at, message_count, file_mtime, file_size, last_byte_offset)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			git_branch, cwd, started_at, ended_at, message_count, file_mtime, file_size, last_byte_offset,
+			agent)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(session_id) DO UPDATE SET
 			project_key = excluded.project_key,
 			project_path = excluded.project_path,
@@ -26,10 +27,11 @@ func UpsertSession(tx *sql.Tx, s *types.Session) error {
 			message_count = excluded.message_count,
 			file_mtime = excluded.file_mtime,
 			file_size = excluded.file_size,
-			last_byte_offset = excluded.last_byte_offset`,
+			last_byte_offset = excluded.last_byte_offset,
+			agent = COALESCE(excluded.agent, sessions.agent)`,
 		s.SessionID, s.ProjectKey, s.ProjectPath, nullStr(s.CustomTitle), nullStr(s.FirstPrompt),
 		nullStr(s.GitBranch), nullStr(s.CWD), nullStr(s.StartedAt), nullStr(s.EndedAt),
-		s.MessageCount, s.FileMtime, s.FileSize, s.LastByteOffset,
+		s.MessageCount, s.FileMtime, s.FileSize, s.LastByteOffset, nullStr(s.Agent),
 	)
 	return err
 }
@@ -107,14 +109,15 @@ const sessionColumns = `s.session_id, s.project_key, s.project_path, COALESCE(s.
 	COALESCE(s.first_prompt,''), COALESCE(s.git_branch,''), COALESCE(s.cwd,''),
 	COALESCE(s.started_at,''), COALESCE(s.ended_at,''), s.message_count, COALESCE(s.summary,''),
 	COALESCE(s.summary_offset,0),
-	COALESCE(si.repo_id,''), COALESCE(si.subpath,''), COALESCE(si.worktree_root,''), COALESCE(si.cwd,'')`
+	COALESCE(si.repo_id,''), COALESCE(si.subpath,''), COALESCE(si.worktree_root,''), COALESCE(si.cwd,''),
+	COALESCE(NULLIF(s.agent,''),'claude')`
 
 // scanSession scans a row produced by sessionColumns.
 func scanSession(scan func(...any) error) (types.Session, error) {
 	var s types.Session
 	err := scan(&s.SessionID, &s.ProjectKey, &s.ProjectPath, &s.CustomTitle, &s.FirstPrompt,
 		&s.GitBranch, &s.CWD, &s.StartedAt, &s.EndedAt, &s.MessageCount, &s.Summary,
-		&s.SummaryOffset, &s.RepoID, &s.Subpath, &s.WorktreeRoot, &s.IdentityCWD)
+		&s.SummaryOffset, &s.RepoID, &s.Subpath, &s.WorktreeRoot, &s.IdentityCWD, &s.Agent)
 	return s, err
 }
 
@@ -236,7 +239,7 @@ func searchMessages(db *sql.DB, f SearchFilter, match string) ([]types.SearchRes
 			snippet(messages_fts, 0, '>>>', '<<<', '...', 40),
 			COALESCE(m.timestamp,''), m.type, COALESCE(m.role,''),
 			COALESCE(s.summary,''), COALESCE(si.repo_id,''), COALESCE(si.cwd, s.cwd, ''),
-			COALESCE(g.seq, -1)
+			COALESCE(g.seq, -1), COALESCE(NULLIF(s.agent,''),'claude')
 		FROM messages_fts
 		JOIN messages m ON m.id = messages_fts.rowid
 		JOIN sessions s ON s.session_id = m.session_id
@@ -293,7 +296,7 @@ func searchMessages(db *sql.DB, f SearchFilter, match string) ([]types.SearchRes
 		var r types.SearchResult
 		if err := rows.Scan(&r.SessionID, &r.ProjectKey, &r.CustomTitle,
 			&r.Snippet, &r.Timestamp, &r.Type, &r.Role,
-			&r.Summary, &r.RepoID, &r.CWD, &r.SegmentSeq); err != nil {
+			&r.Summary, &r.RepoID, &r.CWD, &r.SegmentSeq, &r.Agent); err != nil {
 			return nil, err
 		}
 		results = append(results, r)
