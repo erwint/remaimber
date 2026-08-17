@@ -428,15 +428,21 @@ func listCmd() *cobra.Command {
 
 			for _, s := range sessions {
 				resumable := " "
-				if importer.SessionFileExists(s.ProjectKey, s.SessionID) {
+				if importer.SessionFileExists(s.ProjectKey, s.SessionID, s.Agent) {
 					resumable = "*"
 				}
 				label := s.CustomTitle
 				if label == "" {
 					label = truncate(s.FirstPrompt, 50)
 				}
-				fmt.Printf("%s %-36s  %-20s  %s  [%d msgs]\n",
-					resumable, s.SessionID, importer.PrettyProjectName(s.ProjectKey), label, s.MessageCount)
+				// Only non-default agents are tagged: in an archive that is mostly
+				// Claude Code, marking every row "claude" is noise.
+				agent := ""
+				if s.Agent != "" && s.Agent != importer.AgentClaude {
+					agent = " (" + s.Agent + ")"
+				}
+				fmt.Printf("%s %-36s  %-20s  %s%s  [%d msgs]\n",
+					resumable, s.SessionID, importer.PrettyProjectName(s.ProjectKey), label, agent, s.MessageCount)
 				if loc := sessionLocation(s); loc != "" {
 					fmt.Printf("    %s\n", loc)
 				}
@@ -542,7 +548,7 @@ func searchCmd() *cobra.Command {
 					title = importer.PrettyProjectName(r.ProjectKey)
 				}
 				resumable := " "
-				if importer.SessionFileExists(r.ProjectKey, r.SessionID) {
+				if importer.SessionFileExists(r.ProjectKey, r.SessionID, r.Agent) {
 					resumable = "*"
 				}
 				// The segment locates the hit inside the session, so a long
@@ -551,8 +557,12 @@ func searchCmd() *cobra.Command {
 				if r.SegmentSeq >= 0 {
 					seg = fmt.Sprintf(" seg %d", r.SegmentSeq)
 				}
-				fmt.Printf("%s %s%s [%s] %s (%s)\n  %s\n\n",
-					resumable, shortID(r.SessionID), seg, r.Timestamp, title, r.Role, r.Snippet)
+				agent := ""
+				if r.Agent != "" && r.Agent != importer.AgentClaude {
+					agent = " " + r.Agent
+				}
+				fmt.Printf("%s %s%s%s [%s] %s (%s)\n  %s\n\n",
+					resumable, shortID(r.SessionID), agent, seg, r.Timestamp, title, r.Role, r.Snippet)
 			}
 			if len(results) == 0 {
 				fmt.Println("No results found.")
@@ -941,11 +951,9 @@ func partialResume(database *sql.DB, prefix, cwd string, gi *gitinfo.Identity,
 		picked += bySeq[q].MsgCount
 	}
 
-	carrierKey, err := mover.CarrierKeyForCWD(cwd)
+	sess, _ := db.GetSession(database, sessionID)
+	openCmd, err := prepareForResume(sess, cwd)
 	if err != nil {
-		return err
-	}
-	if err := mover.LinkIntoProject(sessionID, carrierKey); err != nil {
 		return err
 	}
 
@@ -1000,8 +1008,33 @@ func partialResume(database *sql.DB, prefix, cwd string, gi *gitinfo.Identity,
 		shortID(sessionID), formatSeqs(sel))
 	fmt.Printf("Print the messages:    remaimber resume %s --segments %s%s --print\n",
 		shortID(sessionID), formatSeqs(sel), win)
-	fmt.Printf("Full session instead:  claude --resume %s\n", sessionID)
+	fmt.Printf("Full session instead:  %s\n", openCmd)
 	return nil
+}
+
+// prepareForResume makes a session openable from the current worktree and returns
+// the command that opens it. Claude Code resolves a session by id within the
+// project directory matching the cwd, so its file has to be linked under the
+// current carrier key; pi's --session takes an absolute path, so nothing needs
+// moving and the path is the whole answer.
+func prepareForResume(sess *types.Session, cwd string) (openCmd string, err error) {
+	if sess != nil && sess.Agent == importer.AgentPi {
+		path := importer.PiSessionPath(sess.ProjectKey, sess.SessionID)
+		if path == "" {
+			return "", fmt.Errorf("pi session file for %s is gone from %s",
+				shortID(sess.SessionID), importer.PiSessionsDir())
+		}
+		return fmt.Sprintf("pi --session %s", path), nil
+	}
+
+	carrierKey, err := mover.CarrierKeyForCWD(cwd)
+	if err != nil {
+		return "", err
+	}
+	if err := mover.LinkIntoProject(sess.SessionID, carrierKey); err != nil {
+		return "", err
+	}
+	return "claude --resume " + sess.SessionID, nil
 }
 
 // liveSessionID is the conversation this process was invoked from, when there is
@@ -1097,11 +1130,9 @@ func passageResume(database *sql.DB, sessionID, cwd string, all []db.Segment, ma
 		return err
 	}
 
-	carrierKey, err := mover.CarrierKeyForCWD(cwd)
+	sess, _ := db.GetSession(database, sessionID)
+	openCmd, err := prepareForResume(sess, cwd)
 	if err != nil {
-		return err
-	}
-	if err := mover.LinkIntoProject(sessionID, carrierKey); err != nil {
 		return err
 	}
 
@@ -1131,7 +1162,7 @@ func passageResume(database *sql.DB, sessionID, cwd string, all []db.Segment, ma
 		return nil
 	}
 	fmt.Printf("\nPrint it:  remaimber resume %s --match %q --print\n", shortID(sessionID), match)
-	fmt.Printf("Full one:  claude --resume %s\n", sessionID)
+	fmt.Printf("Full one:  %s\n", openCmd)
 	return nil
 }
 
@@ -1202,19 +1233,17 @@ func prepareResume(database *sql.DB, prefix, cwd string, gi *gitinfo.Identity) e
 		}
 	}
 
-	carrierKey, err := mover.CarrierKeyForCWD(cwd)
+	openCmd, err := prepareForResume(sess, cwd)
 	if err != nil {
 		return err
 	}
-	if err := mover.LinkIntoProject(sessionID, carrierKey); err != nil {
-		return err
-	}
 
-	fmt.Printf("Session %s is ready to resume in this worktree.\n\n", shortID(sessionID))
+	fmt.Printf("Session %s (%s) is ready to resume in this worktree.\n\n",
+		shortID(sessionID), sess.Agent)
 	if sess.GitBranch != "" {
 		fmt.Printf("  Branch at capture: %s   (git checkout %s to match)\n\n", sess.GitBranch, sess.GitBranch)
 	}
-	fmt.Printf("  Native resume (new process):  claude --resume %s\n", sessionID)
+	fmt.Printf("  Native resume (new process):  %s\n", openCmd)
 	fmt.Printf("  Continue here (no restart):   ask Claude to \"continue session %s\" — it will load the\n", shortID(sessionID))
 	fmt.Printf("                                context via remaimber and pick up without a restart.\n")
 	return nil
@@ -2297,6 +2326,29 @@ func doctorCmd() *cobra.Command {
 					ok("import hooks are configured")
 				default:
 					warn("no remaimber hooks found in settings.json and the plugin is not enabled — run: remaimber setup")
+				}
+			}
+
+			byAgent := map[string]int{}
+			if rows, err := database.Query(
+				`SELECT COALESCE(NULLIF(agent,''),'claude'), COUNT(*) FROM sessions GROUP BY 1`); err == nil {
+				for rows.Next() {
+					var a string
+					var n int
+					if rows.Scan(&a, &n) == nil {
+						byAgent[a] = n
+					}
+				}
+				rows.Close()
+			}
+			for _, a := range []string{importer.AgentClaude, importer.AgentPi} {
+				switch {
+				case byAgent[a] > 0:
+					ok("%s: %d session(s) archived", a, byAgent[a])
+				case a == importer.AgentPi && importer.PiSessionsDir() != "":
+					if _, err := os.Stat(importer.PiSessionsDir()); err == nil {
+						warn("pi is installed but no sessions archived — run: remaimber import")
+					}
 				}
 			}
 

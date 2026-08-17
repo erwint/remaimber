@@ -18,6 +18,9 @@ type Session struct {
 	FileSize       int64   `json:"-"`
 	LastByteOffset int64   `json:"-"`
 	ImportedAt     string  `json:"imported_at,omitempty"`
+	// Agent is the coding agent that produced the conversation ("claude", "pi").
+	// Empty on rows imported before multi-agent support, which means Claude Code.
+	Agent string `json:"agent,omitempty"`
 
 	// Rolling summary (Phase 5). SummaryOffset is the message-id high-water mark
 	// the summary reflects. Always emitted (even empty) so consumers get a stable
@@ -83,6 +86,9 @@ type SearchResult struct {
 	// that part of the conversation instead of the whole thing. -1 when the
 	// session has not been segmented yet.
 	SegmentSeq int `json:"segment_seq"`
+	// Agent is the coding agent the conversation came from; how it is resumed
+	// depends on it.
+	Agent string `json:"agent,omitempty"`
 }
 
 // JSONLLine represents a raw parsed JSONL line from a conversation file.
