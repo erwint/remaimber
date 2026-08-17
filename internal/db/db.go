@@ -138,6 +138,11 @@ var migrations = []string{
 	// it could mean a self-hosted model that is free, or a summary written before
 	// cost tracking existed. Those need telling apart in any report.
 	`ALTER TABLE session_segments ADD COLUMN model TEXT`,
+
+	// Which coding agent produced the conversation. NULL/'' means Claude Code,
+	// so rows imported before multi-agent support keep their meaning without a
+	// backfill.
+	`ALTER TABLE sessions ADD COLUMN agent TEXT`,
 }
 
 // postMigrations run after the column migrations, once the columns exist.

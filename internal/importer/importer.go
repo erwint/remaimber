@@ -24,7 +24,7 @@ type ImportStats struct {
 
 // ImportAll scans and imports all conversation files.
 func ImportAll(database *sql.DB, force bool) (*ImportStats, error) {
-	files, err := ScanProjects()
+	files, err := ScanAll()
 	if err != nil {
 		return nil, fmt.Errorf("scan: %w", err)
 	}
@@ -96,6 +96,7 @@ func ImportFile(database *sql.DB, sf SessionFile, force bool) (imported bool, ne
 	var sessionMeta sessionMetaAccumulator
 	sessionMeta.projectKey = sf.ProjectKey
 	sessionMeta.projectPath = ProjectPathFromKey(sf.ProjectKey)
+	sessionMeta.agent = sf.AgentOf()
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024) // 10MB max line
@@ -104,6 +105,19 @@ func ImportFile(database *sql.DB, sf SessionFile, force bool) (imported bool, ne
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		bytesRead += int64(len(line)) + 1 // +1 for newline
+
+		if sf.AgentOf() == AgentPi {
+			msg, err := ParsePiLine(sf.SessionID, line)
+			if err != nil || msg == nil {
+				// Unparseable, or an entry that carries no conversation content
+				// (model changes, labels) — still worth its session metadata.
+				sessionMeta.updatePi(line)
+				continue
+			}
+			messages = append(messages, msg)
+			sessionMeta.updatePi(line)
+			continue
+		}
 
 		msg, err := ParseLine(sf.SessionID, line)
 		if err != nil {
@@ -158,6 +172,7 @@ func ImportFile(database *sql.DB, sf SessionFile, force bool) (imported bool, ne
 		FileMtime:      mtime,
 		FileSize:       size,
 		LastByteOffset: bytesRead,
+		Agent:          sessionMeta.agent,
 	}
 	if err := db.UpsertSession(tx, sess); err != nil {
 		return false, 0, 0, fmt.Errorf("upsert session: %w", err)
@@ -190,6 +205,7 @@ func ImportFile(database *sql.DB, sf SessionFile, force bool) (imported bool, ne
 }
 
 type sessionMetaAccumulator struct {
+	agent       string
 	projectKey  string
 	projectPath string
 	customTitle string
@@ -226,5 +242,40 @@ func (a *sessionMetaAccumulator) update(jl *types.JSONLLine) {
 		}
 		a.firstPrompt = text
 		a.seenUser = true
+	}
+}
+
+// updatePi accumulates session metadata from a pi entry. pi records the cwd once
+// in a header line rather than on every entry, and has no git branch or custom
+// title, so this fills fewer fields than the Claude Code path.
+func (a *sessionMetaAccumulator) updatePi(line []byte) {
+	if id, cwd, ok := piSessionHeader(line); ok {
+		if cwd != "" {
+			a.cwd = cwd
+			// pi's own cwd beats the lossy dash-decoded directory name.
+			a.projectPath = cwd
+		}
+		_ = id
+		return
+	}
+
+	var e struct {
+		Type      string `json:"type"`
+		Timestamp string `json:"timestamp"`
+	}
+	if json.Unmarshal(line, &e) != nil {
+		return
+	}
+	if e.Timestamp != "" {
+		if a.startedAt == "" {
+			a.startedAt = e.Timestamp
+		}
+		a.endedAt = e.Timestamp
+	}
+	if !a.seenUser {
+		if p := piFirstPrompt(line); p != "" {
+			a.firstPrompt = p
+			a.seenUser = true
+		}
 	}
 }
