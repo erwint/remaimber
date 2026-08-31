@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"testing"
 
-	"github.com/erwin/remaimber/internal/types"
+	"github.com/erwint/remaimber/internal/types"
 )
 
 func insertSession(t *testing.T, db *sql.DB, s *types.Session) {

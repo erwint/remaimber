@@ -3,7 +3,7 @@ package db
 import (
 	"database/sql"
 
-	"github.com/erwin/remaimber/internal/types"
+	"github.com/erwint/remaimber/internal/types"
 )
 
 // UpsertIdentity records (or updates) a session's durable identity. It is safe

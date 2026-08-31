@@ -9,7 +9,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/erwin/remaimber/internal/db"
+	"github.com/erwint/remaimber/internal/db"
 )
 
 // ThrottledImportInterval is the minimum time between background imports.

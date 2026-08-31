@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/erwin/remaimber/internal/types"
+	"github.com/erwint/remaimber/internal/types"
 )
 
 // A Passage is a contiguous stretch of one conversation that is about a topic —

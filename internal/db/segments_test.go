@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/erwin/remaimber/internal/types"
+	"github.com/erwint/remaimber/internal/types"
 )
 
 func content(ids ...int64) []types.Message {

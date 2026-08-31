@@ -7,8 +7,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/erwin/remaimber/internal/db"
-	"github.com/erwin/remaimber/internal/types"
+	"github.com/erwint/remaimber/internal/db"
+	"github.com/erwint/remaimber/internal/types"
 )
 
 // systemTagPatterns matches system-injected XML noise tags and their content.

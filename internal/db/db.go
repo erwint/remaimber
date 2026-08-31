@@ -9,7 +9,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"github.com/erwin/remaimber/internal/homedir"
+	"github.com/erwint/remaimber/internal/homedir"
 )
 
 const schema = `

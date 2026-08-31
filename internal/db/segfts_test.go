@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/erwin/remaimber/internal/types"
+	"github.com/erwint/remaimber/internal/types"
 )
 
 func seedSummaries(t *testing.T) *sql.DB {

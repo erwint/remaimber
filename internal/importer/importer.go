@@ -9,8 +9,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/erwin/remaimber/internal/db"
-	"github.com/erwin/remaimber/internal/types"
+	"github.com/erwint/remaimber/internal/db"
+	"github.com/erwint/remaimber/internal/types"
 )
 
 // ImportStats tracks import results.

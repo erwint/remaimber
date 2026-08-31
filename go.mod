@@ -1,4 +1,4 @@
-module github.com/erwin/remaimber
+module github.com/erwint/remaimber
 
 go 1.26.2
 

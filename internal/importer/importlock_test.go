@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/erwin/remaimber/internal/db"
+	"github.com/erwint/remaimber/internal/db"
 )
 
 // Hooks fire from every agent at once and three MCP tools refresh the archive

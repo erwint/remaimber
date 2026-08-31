@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/erwin/remaimber/internal/homedir"
+	"github.com/erwint/remaimber/internal/homedir"
 )
 
 // Agent names the coding agent a conversation came from. Sessions from different

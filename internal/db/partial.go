@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/erwin/remaimber/internal/types"
+	"github.com/erwint/remaimber/internal/types"
 )
 
 // SegmentHit is a segment of a session together with how strongly it matched a

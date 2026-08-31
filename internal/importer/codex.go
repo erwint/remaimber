@@ -10,9 +10,9 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/erwin/remaimber/internal/homedir"
-	"github.com/erwin/remaimber/internal/mover"
-	"github.com/erwin/remaimber/internal/types"
+	"github.com/erwint/remaimber/internal/homedir"
+	"github.com/erwint/remaimber/internal/mover"
+	"github.com/erwint/remaimber/internal/types"
 )
 
 // Codex (OpenAI's CLI) writes one JSONL "rollout" per session, but files it by

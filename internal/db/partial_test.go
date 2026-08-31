@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/erwin/remaimber/internal/types"
+	"github.com/erwint/remaimber/internal/types"
 )
 
 func TestParseSegmentSpec(t *testing.T) {

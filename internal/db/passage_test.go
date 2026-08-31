@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/erwin/remaimber/internal/types"
+	"github.com/erwint/remaimber/internal/types"
 )
 
 func TestQueryTerms(t *testing.T) {

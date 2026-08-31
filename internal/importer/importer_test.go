@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/erwin/remaimber/internal/db"
+	"github.com/erwint/remaimber/internal/db"
 )
 
 func testDB(t *testing.T) *sql.DB {

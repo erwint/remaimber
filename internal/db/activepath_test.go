@@ -3,7 +3,7 @@ package db
 import (
 	"testing"
 
-	"github.com/erwin/remaimber/internal/types"
+	"github.com/erwint/remaimber/internal/types"
 )
 
 func TestActivePathSetRewind(t *testing.T) {

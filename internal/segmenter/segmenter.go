@@ -10,9 +10,9 @@ import (
 	"database/sql"
 	"strings"
 
-	"github.com/erwin/remaimber/internal/db"
-	"github.com/erwin/remaimber/internal/summarizer"
-	"github.com/erwin/remaimber/internal/types"
+	"github.com/erwint/remaimber/internal/db"
+	"github.com/erwint/remaimber/internal/summarizer"
+	"github.com/erwint/remaimber/internal/types"
 )
 
 // LLM is the summarization surface the engine needs. summarizer.Config satisfies

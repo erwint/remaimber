@@ -5,7 +5,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/erwin/remaimber/internal/types"
+	"github.com/erwint/remaimber/internal/types"
 )
 
 // toolMarkerLine matches a lone tool-call marker the parser emits for a

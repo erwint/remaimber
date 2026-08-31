@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"time"
 
-	"github.com/erwin/remaimber/internal/types"
+	"github.com/erwint/remaimber/internal/types"
 )
 
 // DefaultSegmentCap is the soft-split size (in content messages): when the open

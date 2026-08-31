@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/erwin/remaimber/internal/db"
-	"github.com/erwin/remaimber/internal/homedir"
-	"github.com/erwin/remaimber/internal/types"
+	"github.com/erwint/remaimber/internal/db"
+	"github.com/erwint/remaimber/internal/homedir"
+	"github.com/erwint/remaimber/internal/types"
 )
 
 // pi (the pi coding agent) keeps conversations in the same broad shape as Claude

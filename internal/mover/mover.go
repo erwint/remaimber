@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/erwin/remaimber/internal/homedir"
+	"github.com/erwint/remaimber/internal/homedir"
 )
 
 // ProjectKeyFromCWD derives Claude Code's project-key encoding for a working

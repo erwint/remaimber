@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/erwin/remaimber/internal/homedir"
+	"github.com/erwint/remaimber/internal/homedir"
 )
 
 // Run configures ~/.claude/settings.json with remaimber hooks and MCP server.

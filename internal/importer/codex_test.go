@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/erwin/remaimber/internal/types"
+	"github.com/erwint/remaimber/internal/types"
 )
 
 func TestCodexSessionIDFromFilename(t *testing.T) {

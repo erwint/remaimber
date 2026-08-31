@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/erwin/remaimber/internal/types"
+	"github.com/erwint/remaimber/internal/types"
 )
 
 // UpsertSession inserts or updates a session record.

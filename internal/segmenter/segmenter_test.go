@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/erwin/remaimber/internal/db"
-	"github.com/erwin/remaimber/internal/types"
+	"github.com/erwint/remaimber/internal/db"
+	"github.com/erwint/remaimber/internal/types"
 )
 
 // fakeLLM records calls and produces deterministic summaries: a segment summary
