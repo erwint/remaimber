@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/erwint/remaimber/internal/types"
 )
@@ -80,9 +81,71 @@ func SessionsNeedingSummary(db *sql.DB, minNew int) ([]SummaryWork, error) {
 // mark it now reflects. Also mirrors the summary into the sessions row so it is
 // searchable via SearchSessionsBySummary.
 func UpdateSummary(db *sql.DB, sessionID, summary string, afterID int64) error {
-	_, err := db.Exec(`UPDATE sessions SET summary = ?, summary_offset = ? WHERE session_id = ?`,
-		summary, afterID, sessionID)
+	// Clearing the recorded failure is part of succeeding: a stale error would
+	// otherwise keep reporting a backend that has since recovered.
+	_, err := db.Exec(`UPDATE sessions
+		SET summary = ?, summary_offset = ?, summary_error = NULL, summary_error_at = NULL
+		WHERE session_id = ?`, summary, afterID, sessionID)
 	return err
+}
+
+// SummaryFailure is one session's last unsuccessful summary attempt.
+type SummaryFailure struct {
+	SessionID string `json:"session_id"`
+	At        string `json:"at"`
+	Error     string `json:"error"`
+}
+
+// summaryErrorMax caps what is stored. An LLM backend can fail with a page of
+// output, and the archive is not a log: the first lines say which backend failed
+// and how, which is what a diagnosis needs.
+const summaryErrorMax = 400
+
+// RecordSummaryError stores why a session could not be summarized. The sweep
+// that hits this runs from hooks whose stderr goes to /dev/null, so this is the
+// only place the reason survives.
+func RecordSummaryError(db *sql.DB, sessionID string, cause error) error {
+	if cause == nil {
+		return nil
+	}
+	msg := cause.Error()
+	if len(msg) > summaryErrorMax {
+		msg = msg[:summaryErrorMax] + "…"
+	}
+	_, err := db.Exec(`UPDATE sessions SET summary_error = ?, summary_error_at = ? WHERE session_id = ?`,
+		msg, time.Now().UTC().Format(time.RFC3339), sessionID)
+	return err
+}
+
+// SummaryFailures returns the most recent failures, newest first.
+func SummaryFailures(db *sql.DB, limit int) ([]SummaryFailure, error) {
+	if limit <= 0 {
+		limit = 5
+	}
+	rows, err := db.Query(`SELECT session_id, COALESCE(summary_error_at,''), COALESCE(summary_error,'')
+		FROM sessions WHERE COALESCE(summary_error,'') != ''
+		ORDER BY summary_error_at DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []SummaryFailure
+	for rows.Next() {
+		var f SummaryFailure
+		if err := rows.Scan(&f.SessionID, &f.At, &f.Error); err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+// CountSummaryFailures reports how many sessions are currently failing.
+func CountSummaryFailures(db *sql.DB) (int, error) {
+	var n int
+	err := db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE COALESCE(summary_error,'') != ''`).Scan(&n)
+	return n, err
 }
 
 // MaxUAMessageID returns the highest message id among a session's user/assistant

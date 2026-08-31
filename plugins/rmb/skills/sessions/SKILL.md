@@ -57,6 +57,7 @@ the session is resumed. If results span worktrees, note which is which via `cwd`
 `remaimber stats` reports summary coverage — an unsummarized session is invisible
 to `recall` and to segment lookups. `remaimber doctor` checks the things that fail
 quietly: hooks not firing, imports gone stale, an installed agent whose sessions
-have never been archived, summaries missing from the search index. Suggest
+have never been archived, summaries missing from the search index, and sessions
+whose last summary attempt errored (which is why a backlog can sit still). Suggest
 `remaimber summarize --all` to catch up, or `remaimber summarize --reindex` when
 summaries exist but aren't searchable (that one makes no model calls).

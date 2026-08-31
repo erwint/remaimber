@@ -1715,7 +1715,10 @@ func runBatchSummarize(ctx context.Context, cfg summarizer.Config, database *sql
 	for _, w := range work {
 		summary, newID, err := segmenter.Reconcile(ctx, cfg, database, w.SessionID, w.FirstPrompt, segmentCap())
 		if err != nil {
+			// Stderr is for whoever is watching; the recorded copy is for the
+			// common case, where this ran from a hook that discarded it.
 			fmt.Fprintf(os.Stderr, "summarize %s: %v\n", shortID(w.SessionID), err)
+			db.RecordSummaryError(database, w.SessionID, err)
 			continue
 		}
 		if err := db.UpdateSummary(database, w.SessionID, summary, newID); err != nil {
@@ -2586,6 +2589,18 @@ func doctorCmd() *cobra.Command {
 					c.SegmentsWithSum-c.IndexedSummaries)
 			} else if c.IndexedSummaries > 0 {
 				ok("%d summaries indexed for intent-level search", c.IndexedSummaries)
+			}
+			if n, err := db.CountSummaryFailures(database); err == nil && n > 0 {
+				fails, _ := db.SummaryFailures(database, 3)
+				warn("%d session(s) failed to summarize — the backlog above is stuck, not idle", n)
+				for _, f := range fails {
+					when := f.At
+					if len(when) > 16 {
+						when = when[:16]
+					}
+					fmt.Printf("        %s %s: %s\n", shortID(f.SessionID), when,
+						truncate(strings.ReplaceAll(f.Error, "\n", " "), 120))
+				}
 			}
 			if _, err := exec.LookPath("claude"); err != nil {
 				warn("the `claude` CLI is not on PATH; summarization will fail unless REMAIMBER_LLM points elsewhere")

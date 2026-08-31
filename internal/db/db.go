@@ -132,6 +132,13 @@ var migrations = []string{
 	`ALTER TABLE messages ADD COLUMN is_compact_summary INTEGER`,
 	`ALTER TABLE messages ADD COLUMN is_tool_result INTEGER`,
 
+	// Why a session's last summary attempt failed. Summarization runs from
+	// hooks that discard stderr, so without somewhere durable to put it a failing
+	// backend is indistinguishable from a quiet one: the backlog simply stops
+	// shrinking, and nothing says why. Cleared on the next success.
+	`ALTER TABLE sessions ADD COLUMN summary_error TEXT`,
+	`ALTER TABLE sessions ADD COLUMN summary_error_at TEXT`,
+
 	// Cost of summarization, recorded per segment so spend is answerable
 	// afterwards rather than only reconstructable from message volume.
 	`ALTER TABLE session_segments ADD COLUMN cost_usd REAL`,

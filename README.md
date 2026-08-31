@@ -195,6 +195,12 @@ Both backends run from hooks, including inside a live Claude session:
 - **Local/HTTP backend** (Ollama, LM Studio, …): a plain HTTP call, no constraints.
 - **`claude` backend**: invoked as `claude -p --no-session-persistence --model haiku`. `--no-session-persistence` means the summarization call creates no session of its own, so it runs fine nested inside a Claude session and fires no lifecycle hooks (no recursion). It needs the `claude` binary and auth available in the hook's environment; where that isn't the case (headless/corporate), use the local/HTTP backend.
 
+When a summary call fails, the reason is written to the session row and reported
+by `remaimber doctor`, not just printed. The sweep runs from hooks that send
+stderr to `/dev/null`, so an unrecorded failure would leave the backlog silently
+stuck — indistinguishable from having nothing left to summarize. The record is
+cleared as soon as that session summarizes successfully.
+
 Summarization treats the conversation transcript as **untrusted data** — the system prompt instructs the model never to follow instructions found inside it and to reply with only the summary, guarding against prompt injection from archived content.
 
 Liveness does not depend on a clean `SessionEnd`: a session is considered "still running" only if its transcript file was modified in the last few minutes, so a killed session correctly ages out on its own.
