@@ -36,6 +36,11 @@ as a plugin — same hooks, plus the `/rmb:recall`, `/rmb:resume` and
 
 #### Codex
 
+Requires **Codex 0.148.0 or newer** (verified on 0.151.0). Asynchronous command
+hooks arrived in 0.148.0; older versions log `skipping async hooks, not supported
+yet` and run the rest, so the archive still gets written before a compaction but
+the background maintenance sweeps and the auto-install never fire.
+
 ```bash
 codex plugin marketplace add erwint/remaimber
 codex plugin add rmb@remaimber
@@ -121,7 +126,7 @@ When running as an MCP server (`remaimber mcp`), these tools are available:
 | | transcripts | resumed with | integration |
 |---|---|---|---|
 | Claude Code | `~/.claude/projects/<key>/<id>.jsonl` | `claude --resume <id>` (after relinking) | `remaimber setup`, or the plugin at the repo root |
-| Codex | `~/.codex/sessions/<y>/<m>/<d>/rollout-*-<id>.jsonl` | `codex resume <id>` | the plugin in `plugins/rmb/` |
+| Codex | `~/.codex/sessions/<y>/<m>/<d>/rollout-*-<id>.jsonl` | `codex resume <id>` | the plugin in `plugins/rmb/` (Codex ≥ 0.148.0) |
 | pi | `~/.pi/agent/sessions/<key>/<ts>_<id>.jsonl` | `pi --session <path>` | the pi package (repo root `package.json`) |
 
 An import is retroactive: the first sweep after adding an agent picks up its

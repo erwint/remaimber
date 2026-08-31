@@ -32,6 +32,12 @@ make test     # runs all tests
 Bump `version` in `plugins/rmb/.codex-plugin/plugin.json` when the Codex plugin
 changes: Codex caches an installed plugin by version.
 
+The Codex plugin needs Codex ≥ 0.148.0, where asynchronous command hooks landed.
+Below that the async hooks are skipped with `skipping async hooks, not supported
+yet`. Dropping `"async": true` for shell backgrounding (`... &`, as the Claude
+Code hooks do) would remove the floor, at the cost of Codex no longer accounting
+for the work it started.
+
 ## Release
 
 ```bash
