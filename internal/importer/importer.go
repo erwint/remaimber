@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"github.com/erwin/remaimber/internal/db"
 	"github.com/erwin/remaimber/internal/types"
@@ -20,10 +21,43 @@ type ImportStats struct {
 	MessagesNew   int
 	MessagesSkip  int
 	Errors        int
+	// Deferred means another importer held the lock and this run did nothing.
+	// Not an error: that importer scans the same files, so its work covers this
+	// caller's, and anything it had already passed is picked up by the next run.
+	Deferred bool
 }
+
+// DefaultImportWait is how long a background importer waits for one already
+// running. Short on purpose: these run inside a hook or an MCP tool call, where
+// stalling the agent is worse than importing a few minutes later.
+const DefaultImportWait = 5 * time.Second
+
+// InteractiveImportWait is for an import somebody asked for. Waiting is what
+// they want; returning "another import is running" is not.
+const InteractiveImportWait = 60 * time.Second
 
 // ImportAll scans and imports all conversation files.
 func ImportAll(database *sql.DB, force bool) (*ImportStats, error) {
+	return ImportAllWithin(database, force, DefaultImportWait)
+}
+
+// ImportAllWithin imports under a lock, waiting up to wait for any importer
+// already running.
+//
+// Hooks fire from every agent at once, and three MCP tools refresh the archive
+// before they read it, so several importers can be live at the same time. They
+// do not corrupt anything without this — WAL plus INSERT OR IGNORE and byte
+// offsets make a concurrent import redundant rather than harmful — but they
+// contend inside SQLite, and a write transaction that outlasts the busy timeout
+// fails a file that then waits for the next sweep. Queueing is cheaper than
+// contending, and skipping is cheaper than queueing forever.
+func ImportAllWithin(database *sql.DB, force bool, wait time.Duration) (*ImportStats, error) {
+	lock := AcquireLockWait(ImportLockName, wait)
+	if lock == nil {
+		return &ImportStats{Deferred: true}, nil
+	}
+	defer Release(lock)
+
 	files, err := ScanAll()
 	if err != nil {
 		return nil, fmt.Errorf("scan: %w", err)

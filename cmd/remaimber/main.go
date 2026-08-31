@@ -144,9 +144,14 @@ func importCmd() *cobra.Command {
 			}
 			defer database.Close()
 
-			stats, err := importer.ImportAll(database, force)
+			stats, err := importer.ImportAllWithin(database, force, importer.InteractiveImportWait)
 			if err != nil {
 				return err
+			}
+			if stats.Deferred {
+				fmt.Println("Another import is still running — nothing to do here;")
+				fmt.Println("it scans the same files, so this run would only duplicate it.")
+				return nil
 			}
 
 			fmt.Printf("Scanned: %d files\n", stats.FilesScanned)

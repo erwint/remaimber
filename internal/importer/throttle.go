@@ -83,6 +83,38 @@ func AcquireSummarizeLock() *os.File {
 	return AcquireLock(".last-summary")
 }
 
+// ImportLockName is the mutex every importer takes, throttled sweep and one-off
+// alike. It is deliberately not one of the throttle stamps: a sweep holds its
+// stamp for the whole run, and flock conflicts between two descriptors in the
+// same process, so reusing it would have the sweep deadlock against itself.
+const ImportLockName = ".import.lock"
+
+// AcquireLockWait takes the named lock, waiting up to wait for a holder to
+// finish. Returns nil if it could not be taken in time — a caller that cannot
+// get in is expected to skip its work, not to force it.
+func AcquireLockWait(name string, wait time.Duration) *os.File {
+	deadline := time.Now().Add(wait)
+	for {
+		if f := AcquireLock(name); f != nil {
+			return f
+		}
+		if !time.Now().Before(deadline) {
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// Release drops a lock without stamping it. The import mutex records no time —
+// it says who is running, not when a sweep last ran.
+func Release(f *os.File) {
+	if f == nil {
+		return
+	}
+	syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	f.Close()
+}
+
 // TouchAndRelease writes the current timestamp into the lock file and releases it.
 func TouchAndRelease(f *os.File) {
 	if f == nil {

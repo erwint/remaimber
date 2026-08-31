@@ -191,5 +191,6 @@ remaimber archives everything into `~/.claude/remaimber/remaimber.db` with:
 - **Full conversation memory** — stores all JSONL line types, not filtered
 - **FTS5 search** — porter stemming, date/role/project filtering
 - **UUID + content-hash dedup** — safe concurrent imports, no duplicates
+- **One importer at a time** — hooks fire from every agent at once, so importers take a lock and wait briefly for each other rather than contending inside SQLite; one that cannot get in skips, since the running import scans the same files
 - **Byte-offset tracking** — incremental imports skip already-processed content
 - **Content cleaning** — strips system-injected XML tags from search index
