@@ -79,6 +79,11 @@ const salientMessages = `role IN ('user','assistant')
 	AND COALESCE(content_text,'') != ''
 	AND is_sidechain = 0 AND is_compact_summary = 0 AND is_tool_result = 0`
 
+// agentIs matches a session's originating agent. Rows imported before
+// multi-agent support carry no agent at all, which means Claude Code, so the
+// comparison has to normalise rather than read the column directly.
+const agentIs = `COALESCE(NULLIF(s.agent,''),'claude') = ?`
+
 // GetSessionMeta retrieves file tracking metadata for a session.
 func GetSessionMeta(db *sql.DB, sessionID string) (mtime float64, size int64, offset int64, found bool, err error) {
 	err = db.QueryRow(`SELECT file_mtime, file_size, last_byte_offset FROM sessions WHERE session_id = ?`, sessionID).
@@ -97,6 +102,7 @@ type ListFilter struct {
 	Project string
 	Repo    string // exact match on session_identity.repo_id (cross-worktree)
 	Subpath string // exact match on session_identity.subpath
+	Agent   string // exact match on the originating agent ("claude", "codex", "pi")
 	Since   string // ISO timestamp
 	Until   string // ISO timestamp
 	Limit   int
@@ -137,6 +143,10 @@ func ListSessions(db *sql.DB, f ListFilter) ([]types.Session, error) {
 	if f.Subpath != "" {
 		query += ` AND si.subpath = ?`
 		args = append(args, f.Subpath)
+	}
+	if f.Agent != "" {
+		query += ` AND ` + agentIs
+		args = append(args, f.Agent)
 	}
 	if f.Since != "" {
 		query += ` AND s.ended_at >= ?`
@@ -180,6 +190,7 @@ type SearchFilter struct {
 	Until          string
 	Limit          int
 	ExcludeSession string // exclude this session ID from results
+	Agent          string // exact match on the originating agent ("claude", "codex", "pi")
 	// IncludeToolOutput brings tool-result turns back into the results. They are
 	// dropped by default: they are the bulk of an agentic transcript, and they
 	// include this tool's own archived output, so a search for a term can
@@ -254,6 +265,10 @@ func searchMessages(db *sql.DB, f SearchFilter, match string) ([]types.SearchRes
 	if f.ExcludeSession != "" {
 		q += ` AND m.session_id != ?`
 		args = append(args, f.ExcludeSession)
+	}
+	if f.Agent != "" {
+		q += ` AND ` + agentIs
+		args = append(args, f.Agent)
 	}
 	if f.Project != "" {
 		q += ` AND s.project_key LIKE ?`

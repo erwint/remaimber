@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/erwin/remaimber/internal/homedir"
 )
 
 // ProjectKeyFromCWD derives Claude Code's project-key encoding for a working
@@ -32,7 +34,7 @@ func ProjectKeyFromCWD(cwd string) string {
 // (authoritative, created by Claude for the live session), then falls back to
 // scanning for a dir whose sessions ran in cwd, then to the forward encoding.
 func CarrierKeyForCWD(cwd string) (string, error) {
-	home, err := os.UserHomeDir()
+	home, err := homedir.Dir()
 	if err != nil {
 		return "", err
 	}
@@ -94,7 +96,7 @@ func firstLineCWD(path string) string {
 // the file's structure. No-op if the file, the entries array, or the entry is
 // absent. This is what surfaces remaimber summaries in Claude's resume dialog.
 func SetIndexSummary(projectKey, sessionID, summary string) error {
-	home, err := os.UserHomeDir()
+	home, err := homedir.Dir()
 	if err != nil {
 		return err
 	}
@@ -146,7 +148,7 @@ func LinkIntoProject(sessionID, targetProject string) error {
 
 // Move moves or copies a conversation JSONL file to a different project.
 func Move(sessionID, targetProject string, copyOnly bool) error {
-	home, err := os.UserHomeDir()
+	home, err := homedir.Dir()
 	if err != nil {
 		return err
 	}

@@ -1,6 +1,8 @@
 # remaimber
 
-Archive, search, and manage Claude Code conversations. A Go CLI + MCP server that stores all conversation data in SQLite with FTS5 full-text search.
+Archive, search, and manage coding-agent conversations — Claude Code, Codex and pi in one archive. A Go CLI + MCP server that stores all conversation data in SQLite with FTS5 full-text search.
+
+Every agent's sessions land in the same database, keyed to the same projects, so a conversation you had in one is findable and resumable from another.
 
 ## Install
 
@@ -16,16 +18,45 @@ Download the latest binary from [GitHub Releases](https://github.com/erwint/rema
 
 ### Setup
 
-After installing, run setup to configure Claude Code hooks and MCP server:
+`remaimber import` works on its own — it reads every agent's transcripts off disk.
+Wiring it into an agent adds the parts a scheduled import can't do: archiving
+*before* `/compact` destroys data, capturing a session's repo identity while its
+worktree still exists, and giving the agent the search tools.
+
+#### Claude Code
 
 ```bash
 remaimber setup
 ```
 
-This adds:
-- **PreCompact hook** — auto-archives before `/compact` destroys data
-- **SessionEnd hook** — auto-archives when a session ends
-- **MCP server** — lets Claude Code search its own conversation history
+This adds the hooks (`SessionStart`, `PreCompact`, `Notification`, `SessionEnd`)
+and the MCP server to `~/.claude/settings.json`. Alternatively install this repo
+as a plugin — same hooks, plus the `/rmb:recall`, `/rmb:resume` and
+`/rmb:sessions` commands.
+
+#### Codex
+
+```bash
+codex plugin marketplace add erwint/remaimber
+codex plugin add rmb@remaimber
+```
+
+The plugin (`plugins/rmb/`) bundles the lifecycle hooks, the MCP server, and the
+`recall` / `resume` / `sessions` skills. Codex does not trust bundled hooks on
+install: run `/hooks` once and trust them, or they are silently skipped. If
+`remaimber` isn't on PATH yet, the `SessionStart` hook downloads it from the
+latest release.
+
+#### pi
+
+```bash
+pi install git:github.com/erwint/remaimber
+```
+
+pi has no MCP, so the package ships the same skills written against the CLI, plus
+an extension (`pi/extensions/remaimber.ts`) that hooks `session_start`,
+`agent_settled`, `session_compact` and `session_shutdown`. Install `remaimber`
+itself first — the extension calls it and stays quiet when it's absent.
 
 ## Usage
 
@@ -85,6 +116,38 @@ When running as an MCP server (`remaimber mcp`), these tools are available:
 
 `search_conversations` and `list_sessions` accept `repo: "."` and `subpath: "."` to mean "the current repo / subpath", resolved from the server's working directory.
 
+## Agents
+
+| | transcripts | resumed with | integration |
+|---|---|---|---|
+| Claude Code | `~/.claude/projects/<key>/<id>.jsonl` | `claude --resume <id>` (after relinking) | `remaimber setup`, or the plugin at the repo root |
+| Codex | `~/.codex/sessions/<y>/<m>/<d>/rollout-*-<id>.jsonl` | `codex resume <id>` | the plugin in `plugins/rmb/` |
+| pi | `~/.pi/agent/sessions/<key>/<ts>_<id>.jsonl` | `pi --session <path>` | the pi package (repo root `package.json`) |
+
+An import is retroactive: the first sweep after adding an agent picks up its
+whole history, not just new sessions. Two derived layers lag behind it. Summaries
+catch up on their own — the throttled sweep takes the entire backlog, newest
+first — or force them now with `remaimber summarize --all`. Durable repo identity
+is *not* retroactive: run `remaimber backfill-identity` once so `--repo .` finds
+the older sessions (those whose cwd no longer exists stay unattributed).
+
+Every agent shares one archive at `~/.remaimber/remaimber.db`. An archive still
+sitting at the old `~/.claude/remaimber/` is moved there on first use, with a
+symlink left behind so a session already running against the old path keeps
+reaching the same database without a restart.
+
+Sessions carry the agent they came from, and `remaimber resume <id>` prints the
+right command for it. Searches span every agent by default; `--agent claude`,
+`--agent codex` or `--agent pi` narrows `search`, `recall` and `list` to one.
+The MCP tools invert that default: `search_conversations`, `find_context` and
+`list_sessions` scope to the calling agent's own conversations, since an agent
+asking through MCP is nearly always looking for its own earlier work — pass
+`agent: "all"` to search every agent, or name one. Codex files rollouts by date rather than by project, so its
+project key comes from the cwd recorded in each rollout's own header — which puts
+it in the same project bucket as the Claude Code and pi sessions for that
+directory. `remaimber doctor` reports, per agent, whether an installed one has
+never been archived.
+
 ## Cross-worktree find & resume
 
 Claude Code keys session storage by launch directory, so the same repo scatters across many project keys (one per worktree) and native `--resume` can't find sessions from other worktrees — or from Agent worktrees that were later deleted.
@@ -100,7 +163,7 @@ If a chosen session looks like it's still running in another worktree, resume wa
 
 | Env var | Default | Purpose |
 |---------|---------|---------|
-| `REMAIMBER_DB` | `~/.claude/remaimber/remaimber.db` | Database path |
+| `REMAIMBER_DB` | `~/.remaimber/remaimber.db` | Database path. One archive for every agent |
 | `REMAIMBER_LLM` | `claude` | Summary backend: `claude` (uses the local CLI) or an OpenAI-compatible base URL (e.g. `http://localhost:11434/v1` for Ollama, `http://localhost:1234/v1` for LM Studio) |
 | `REMAIMBER_LLM_MODEL` | `haiku` (claude backend) | Model name for summarization |
 | `REMAIMBER_LLM_KEY` | — | Optional bearer token for the HTTP backend |
@@ -122,7 +185,7 @@ Liveness does not depend on a clean `SessionEnd`: a session is considered "still
 
 ## How it works
 
-Claude Code stores conversations as JSONL files in `~/.claude/projects/`. These files get deleted after `cleanupPeriodDays` and are destroyed by `/compact`.
+Coding agents store conversations as JSONL files — `~/.claude/projects/` for Claude Code, `~/.codex/sessions/` for Codex, `~/.pi/agent/sessions/` for pi. Those files get pruned on a retention schedule and are destroyed by compaction.
 
 remaimber archives everything into `~/.claude/remaimber/remaimber.db` with:
 - **Full conversation memory** — stores all JSONL line types, not filtered

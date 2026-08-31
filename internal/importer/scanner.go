@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/erwin/remaimber/internal/homedir"
 )
 
 // Agent names the coding agent a conversation came from. Sessions from different
@@ -12,6 +14,7 @@ import (
 const (
 	AgentClaude = "claude"
 	AgentPi     = "pi"
+	AgentCodex  = "codex"
 )
 
 // SessionFile represents a discovered JSONL conversation file.
@@ -42,15 +45,22 @@ func ScanAll() ([]SessionFile, error) {
 	}
 	pi, piErr := ScanPi()
 	files = append(files, pi...)
-	if err == nil && piErr != nil && len(files) == 0 {
-		return nil, piErr
+	codex, codexErr := ScanCodex()
+	files = append(files, codex...)
+	if len(files) == 0 {
+		if piErr != nil {
+			return nil, piErr
+		}
+		if codexErr != nil {
+			return nil, codexErr
+		}
 	}
 	return files, nil
 }
 
 // ScanProjects scans ~/.claude/projects/ for JSONL conversation files.
 func ScanProjects() ([]SessionFile, error) {
-	home, err := os.UserHomeDir()
+	home, err := homedir.Dir()
 	if err != nil {
 		return nil, err
 	}
@@ -104,10 +114,13 @@ func ProjectPathFromKey(key string) string {
 // SessionFileExists checks if a session's JSONL file still exists on disk.
 // Agent may be empty for rows predating multi-agent support, which means Claude Code.
 func SessionFileExists(projectKey, sessionID, agent string) bool {
-	if agent == AgentPi {
+	switch agent {
+	case AgentPi:
 		return PiSessionPath(projectKey, sessionID) != ""
+	case AgentCodex:
+		return CodexSessionPath(sessionID) != ""
 	}
-	home, err := os.UserHomeDir()
+	home, err := homedir.Dir()
 	if err != nil {
 		return false
 	}

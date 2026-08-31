@@ -38,7 +38,7 @@ func seedSummaries(t *testing.T) *sql.DB {
 func TestSearchSummariesMatchesRememberedPhrasing(t *testing.T) {
 	database := seedSummaries(t)
 
-	hits, err := SearchSummaries(database, "smtp relay on the nas", 10)
+	hits, err := SearchSummaries(database, "smtp relay on the nas", "", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func TestSearchSummariesMatchesRememberedPhrasing(t *testing.T) {
 		t.Errorf("project not joined: %q", hits[0].ProjectKey)
 	}
 
-	if hits, _ := SearchSummaries(database, "kubernetes ingress", 10); len(hits) != 0 {
+	if hits, _ := SearchSummaries(database, "kubernetes ingress", "", 10); len(hits) != 0 {
 		t.Errorf("unrelated topic returned %d hits", len(hits))
 	}
 }
@@ -65,10 +65,10 @@ func TestIndexSegmentSummaryReplaces(t *testing.T) {
 	if err := IndexSegmentSummary(database, "s1", 0, "Now about DNS resolution instead."); err != nil {
 		t.Fatal(err)
 	}
-	if hits, _ := SearchSummaries(database, "postfix relay", 10); len(hits) != 0 {
+	if hits, _ := SearchSummaries(database, "postfix relay", "", 10); len(hits) != 0 {
 		t.Errorf("stale summary still indexed: %+v", hits)
 	}
-	hits, _ := SearchSummaries(database, "dns resolution", 10)
+	hits, _ := SearchSummaries(database, "dns resolution", "", 10)
 	if len(hits) != 1 || hits[0].Seq != 0 {
 		t.Errorf("replacement not indexed: %+v", hits)
 	}
@@ -90,7 +90,7 @@ func TestReindexAndCoverage(t *testing.T) {
 	if err := UpsertSegment(database, &seg); err != nil {
 		t.Fatal(err)
 	}
-	if hits, _ := SearchSummaries(database, "pinned toolchain", 10); len(hits) != 0 {
+	if hits, _ := SearchSummaries(database, "pinned toolchain", "", 10); len(hits) != 0 {
 		t.Fatal("unindexed summary should not be searchable yet")
 	}
 
@@ -109,7 +109,7 @@ func TestReindexAndCoverage(t *testing.T) {
 	if n != 4 {
 		t.Errorf("reindexed %d, want 4", n)
 	}
-	if hits, _ := SearchSummaries(database, "pinned toolchain", 10); len(hits) != 1 {
+	if hits, _ := SearchSummaries(database, "pinned toolchain", "", 10); len(hits) != 1 {
 		t.Error("reindex did not make the summary searchable")
 	}
 	if c, _ := GetSummaryCoverage(database); c.IndexedSummaries != 4 {

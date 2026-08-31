@@ -1,8 +1,10 @@
 ---
-description: Search archived Claude Code conversations by keyword, topic, or date
+description: Search archived Claude Code, Codex and pi conversations by keyword, topic, or date
 ---
 
-Find something in the user's archived Claude Code conversations.
+Find something in the user's archived conversations. The archive spans every agent
+remaimber has imported — Claude Code, Codex and pi — so a session from any of them
+is findable here.
 
 ## Pick the right tool for what they remember
 
@@ -13,8 +15,11 @@ Three lookups exist, and they fail in different ways. Choose by what the user ac
 **They remember an exact string** — an error message, a flag, a function name. Use `remaimber search`, which matches literal message text:
 
 ```
-remaimber search $ARGUMENTS --limit 10 --exclude-session $CLAUDE_SESSION_ID
+remaimber search $ARGUMENTS --limit 10
 ```
+
+It excludes the live session by itself, so a search from inside a conversation
+doesn't rank that conversation's own discussion of the term first.
 
 **They remember an outcome but no phrasing at all** — "when did we sort out the DHCPv6 stalls?". Use `remaimber recall <topic>`, which searches segment *summaries* rather than raw text, so it matches what the work turned out to be even when nobody typed those words together.
 
@@ -23,7 +28,7 @@ remaimber search $ARGUMENTS --limit 10 --exclude-session $CLAUDE_SESSION_ID
 All three accept scoping. Add them when the user implies a scope:
 
 - `--repo .` restricts to the current repo across every worktree; `--subpath .` narrows to the current sub-project
-- `--project <name>` filters by project key
+- `--agent claude|codex|pi` restricts to one agent; the CLI searches all of them by default, while the MCP tools default to this agent's own conversations and take `agent: "all"` to widen
 - `--since <date>` / `--until <date>` for date ranges (ISO 8601, e.g. `2026-08-06T11:18`)
 - `--role user` / `--role assistant` (search only)
 
@@ -31,6 +36,6 @@ All three accept scoping. Add them when the user implies a scope:
 
 ## Presenting results
 
-Give session ID (first 8 chars), timestamp, project, and the matching snippet. A leading `*` means resumable. Search results carry a `segment_seq` — mention it when offering to pull that part back, since it feeds straight into `remaimber resume <id> --segments <seq>`.
+Give session ID (first 8 chars), timestamp, project, and the matching snippet. A leading `*` means resumable. Results from another agent are tagged with its name next to the project — keep that visible, since it decides how the session is resumed. Search results carry a `segment_seq` — mention it when offering to pull that part back, since it feeds straight into `remaimber resume <id> --segments <seq>`.
 
 If nothing comes back, say so plainly and check `remaimber stats` for summary coverage before concluding the conversation isn't archived — an unsummarized session is invisible to `recall` and to segment lookups, though `search` still finds it.

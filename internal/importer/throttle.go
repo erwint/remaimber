@@ -8,6 +8,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/erwin/remaimber/internal/db"
 )
 
 // ThrottledImportInterval is the minimum time between background imports.
@@ -17,9 +19,14 @@ const ThrottledImportInterval = 5 * time.Minute
 // sweeps. Larger than imports because summarization is heavier (an LLM call).
 const ThrottledSummarizeInterval = 15 * time.Minute
 
+// remaimberDir is where the throttle stamps and locks live — the same directory
+// as the archive, so the two move together.
 func remaimberDir() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".claude", "remaimber")
+	dir, err := db.StateDir()
+	if err != nil {
+		return ""
+	}
+	return dir
 }
 
 func stampPath(name string) string {

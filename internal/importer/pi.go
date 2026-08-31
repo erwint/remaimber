@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/erwin/remaimber/internal/db"
+	"github.com/erwin/remaimber/internal/homedir"
 	"github.com/erwin/remaimber/internal/types"
 )
 
@@ -24,7 +25,7 @@ import (
 
 // PiSessionsDir is where pi stores its session tree.
 func PiSessionsDir() string {
-	home, err := os.UserHomeDir()
+	home, err := homedir.Dir()
 	if err != nil {
 		return ""
 	}

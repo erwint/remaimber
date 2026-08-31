@@ -1,6 +1,6 @@
 {
   "name": "remaimber",
-  "description": "Archive and search Claude Code conversations with SQLite FTS5",
+  "description": "Archive and search Claude Code, Codex and pi conversations with SQLite FTS5",
   "owner": {
     "name": "erwint",
     "url": "https://github.com/erwint"
@@ -8,7 +8,7 @@
   "plugins": [
     {
       "name": "rmb",
-      "description": "Search and recall archived Claude Code conversations",
+      "description": "Search and recall archived Claude Code, Codex and pi conversations",
       "source": "./",
       "homepage": "https://github.com/erwint/remaimber",
       "category": "productivity",

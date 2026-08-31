@@ -67,7 +67,7 @@ type SummaryHit struct {
 // almost nothing — asking for "smtp relay on the nas" found zero summaries while
 // the work was plainly there. Filler is dropped first and bm25 does the ranking,
 // the same treatment passages get.
-func SearchSummaries(db *sql.DB, query string, limit int) ([]SummaryHit, error) {
+func SearchSummaries(db *sql.DB, query, agent string, limit int) ([]SummaryHit, error) {
 	terms := QueryTerms(query)
 	if len(terms) == 0 {
 		return nil, nil
@@ -76,22 +76,33 @@ func SearchSummaries(db *sql.DB, query string, limit int) ([]SummaryHit, error) 
 	for i, t := range terms {
 		quoted[i] = `"` + strings.ReplaceAll(t, `"`, "") + `"`
 	}
-	return searchSummaries(db, strings.Join(quoted, " OR "), limit)
+	return searchSummaries(db, strings.Join(quoted, " OR "), agent, limit)
 }
 
-func searchSummaries(db *sql.DB, match string, limit int) ([]SummaryHit, error) {
+func searchSummaries(db *sql.DB, match, agent string, limit int) ([]SummaryHit, error) {
 	if limit <= 0 {
 		limit = 20
 	}
-	rows, err := db.Query(`
+	q := `
 		SELECT m.session_id, m.seq, f.summary, bm25(segments_fts),
 			COALESCE(s.project_key,'')
 		FROM segments_fts f
 		JOIN segments_fts_map m ON m.rowid = f.rowid
 		LEFT JOIN sessions s ON s.session_id = m.session_id
-		WHERE segments_fts MATCH ?
+		WHERE segments_fts MATCH ?`
+	args := []any{match}
+	if agent != "" {
+		// An unsummarized session has no segment rows at all, so this filters
+		// what recall can see rather than narrowing a complete set.
+		q += ` AND ` + agentIs
+		args = append(args, agent)
+	}
+	q += `
 		ORDER BY bm25(segments_fts)
-		LIMIT ?`, match, limit)
+		LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := db.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}

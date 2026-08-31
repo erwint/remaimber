@@ -106,6 +106,15 @@ func ImportFile(database *sql.DB, sf SessionFile, force bool) (imported bool, ne
 		line := scanner.Bytes()
 		bytesRead += int64(len(line)) + 1 // +1 for newline
 
+		if sf.AgentOf() == AgentCodex {
+			msg, err := ParseCodexLine(sf.SessionID, line)
+			if err == nil && msg != nil {
+				messages = append(messages, msg)
+			}
+			sessionMeta.updateCodex(line)
+			continue
+		}
+
 		if sf.AgentOf() == AgentPi {
 			msg, err := ParsePiLine(sf.SessionID, line)
 			if err != nil || msg == nil {
@@ -242,6 +251,41 @@ func (a *sessionMetaAccumulator) update(jl *types.JSONLLine) {
 		}
 		a.firstPrompt = text
 		a.seenUser = true
+	}
+}
+
+// updateCodex accumulates session metadata from a Codex rollout entry. Codex
+// records the cwd and git branch once, in the session_meta header, and stamps
+// every entry with a timestamp.
+func (a *sessionMetaAccumulator) updateCodex(line []byte) {
+	var e codexEntry
+	if json.Unmarshal(line, &e) != nil {
+		return
+	}
+	if e.Type == "session_meta" {
+		var p codexPayload
+		if json.Unmarshal(e.Payload, &p) == nil {
+			if p.CWD != "" {
+				a.cwd = p.CWD
+				// Codex's own cwd beats the lossy dash-decoded directory name.
+				a.projectPath = p.CWD
+			}
+			if p.Git != nil && p.Git.Branch != "" {
+				a.gitBranch = p.Git.Branch
+			}
+		}
+	}
+	if e.Timestamp != "" {
+		if a.startedAt == "" {
+			a.startedAt = e.Timestamp
+		}
+		a.endedAt = e.Timestamp
+	}
+	if !a.seenUser {
+		if p := codexFirstPrompt(line); p != "" {
+			a.firstPrompt = p
+			a.seenUser = true
+		}
 	}
 }
 

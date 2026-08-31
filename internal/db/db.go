@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	_ "modernc.org/sqlite"
+
+	"github.com/erwin/remaimber/internal/homedir"
 )
 
 const schema = `
@@ -183,17 +185,93 @@ func migrateFlags(db *sql.DB) error {
 	return err
 }
 
-// DBPath returns the default database path.
-func DBPath() (string, error) {
-	home, err := os.UserHomeDir()
+// DBFile is the archive's filename inside the state directory.
+const DBFile = "remaimber.db"
+
+// StateDir returns the directory holding the archive and the throttle stamps,
+// moving it out of ~/.claude on first use. The archive lived there when Claude
+// Code was the only agent it knew about; it now holds Codex and pi conversations
+// too, and a path named after one agent misdescribes what is in it.
+//
+// The move happens once, is a rename (so no copy can half-succeed), and takes
+// the stamps along with the database. A symlink is left behind at the old path,
+// because processes are running against it: an MCP server opens the archive when
+// the agent starts and can outlive the move by hours. A rename keeps their open
+// file descriptors valid (same inode), and the symlink keeps any connection they
+// open afterwards pointing at the same file rather than creating an empty
+// database where the old one used to be. So a live session keeps working, with
+// no restart.
+//
+// If the move cannot be done, the legacy directory keeps being used: continuing
+// to read the real archive from the old place beats silently starting an empty
+// one in the new place.
+func StateDir() (string, error) {
+	home, err := homedir.Dir()
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(home, ".claude", "remaimber")
+	dir := filepath.Join(home, ".remaimber")
+	legacy := filepath.Join(home, ".claude", "remaimber")
+
+	if _, err := os.Stat(filepath.Join(dir, DBFile)); err == nil {
+		return dir, nil // already moved
+	}
+	if _, err := os.Stat(filepath.Join(legacy, DBFile)); err == nil {
+		if err := migrateStateDir(legacy, dir); err != nil {
+			fmt.Fprintf(os.Stderr, "remaimber: keeping the archive in %s (could not move it to %s: %v)\n",
+				legacy, dir, err)
+			return legacy, nil
+		}
+		fmt.Fprintf(os.Stderr, "remaimber: moved the archive from %s to %s\n", legacy, dir)
+		return dir, nil
+	}
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "remaimber.db"), nil
+	return dir, nil
+}
+
+// migrateStateDir renames every file of the old state directory into the new
+// one. A file already present in the destination is left alone rather than
+// overwritten — the destination is the newer archive in that case.
+func migrateStateDir(legacy, dir string) error {
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(legacy)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		from, to := filepath.Join(legacy, e.Name()), filepath.Join(dir, e.Name())
+		if _, err := os.Stat(to); err == nil {
+			continue
+		}
+		if err := os.Rename(from, to); err != nil {
+			// Another process may have moved it between the scan and now.
+			if os.IsNotExist(err) {
+				continue
+			}
+			return err
+		}
+	}
+	// The pointer for whoever is still holding the old path. Best-effort: a
+	// failure here costs those processes their archive at their next reconnect,
+	// not this one its move.
+	if err := os.Symlink(filepath.Join(dir, DBFile), filepath.Join(legacy, DBFile)); err != nil && !os.IsExist(err) {
+		fmt.Fprintf(os.Stderr, "remaimber: could not leave a pointer at %s: %v\n",
+			filepath.Join(legacy, DBFile), err)
+	}
+	return nil
+}
+
+// DBPath returns the default database path.
+func DBPath() (string, error) {
+	dir, err := StateDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, DBFile), nil
 }
 
 // Open opens the database, creates schema if needed, and configures WAL mode.

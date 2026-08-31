@@ -6,11 +6,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/erwin/remaimber/internal/homedir"
 )
 
 // Run configures ~/.claude/settings.json with remaimber hooks and MCP server.
 func Run() error {
-	home, err := os.UserHomeDir()
+	home, err := homedir.Dir()
 	if err != nil {
 		return err
 	}

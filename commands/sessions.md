@@ -1,8 +1,9 @@
 ---
-description: List recent conversation sessions with summaries, including those from worktrees
+description: List recent conversation sessions with summaries, across agents and worktrees
 ---
 
-List archived Claude Code sessions using `remaimber list`, showing each session's summary.
+List archived sessions using `remaimber list`, showing each session's summary. The
+archive spans every imported agent — Claude Code, Codex and pi.
 
 ## What to run
 
@@ -27,7 +28,8 @@ uses it to gather every session for the current repo regardless of worktree.
 
 Show a row per session: resumable indicator (`*` = its transcript still exists),
 session id (first 8 chars), repo subpath or project, message count — and the
-**summary** as the description (fall back to the first prompt only when a session
+**summary** as the description (sessions from an agent other than Claude Code are
+tagged with the agent name next to the project) (fall back to the first prompt only when a session
 has no summary yet). If results span worktrees, note which is which via `cwd` /
 `worktree_root`.
 

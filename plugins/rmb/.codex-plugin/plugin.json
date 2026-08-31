@@ -1,0 +1,36 @@
+{
+  "name": "rmb",
+  "version": "1.2.0",
+  "description": "Search and recall archived Codex, Claude Code and pi conversations",
+  "author": {
+    "name": "erwint",
+    "url": "https://github.com/erwint"
+  },
+  "homepage": "https://github.com/erwint/remaimber",
+  "repository": "https://github.com/erwint/remaimber",
+  "license": "MIT",
+  "keywords": [
+    "search",
+    "conversations",
+    "archive",
+    "memory"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "remaimber",
+    "shortDescription": "Recall past conversations across agents",
+    "longDescription": "Archives every Codex, Claude Code and pi conversation into a local SQLite database with full-text search, then makes them findable: search exact strings, recall a topic by what the work turned out to be, or pull back just the part of an old session that matters and resume from it.",
+    "developerName": "erwint",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Read"
+    ],
+    "defaultPrompt": [
+      "Find the conversation where we set up the mail relay",
+      "What did I work on last week?",
+      "Resume the session about the flaky tests"
+    ]
+  }
+}

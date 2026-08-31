@@ -64,12 +64,16 @@ func TestOpenAt_Idempotent(t *testing.T) {
 }
 
 func TestDBPath(t *testing.T) {
+	// Against a temporary home, not the real one: DBPath resolves the state
+	// directory, and resolving it can migrate an archive.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
 	path, err := DBPath()
 	if err != nil {
 		t.Fatalf("DBPath: %v", err)
 	}
-	home, _ := os.UserHomeDir()
-	expected := filepath.Join(home, ".claude", "remaimber", "remaimber.db")
+	expected := filepath.Join(home, ".remaimber", DBFile)
 	if path != expected {
 		t.Errorf("DBPath = %q, want %q", path, expected)
 	}

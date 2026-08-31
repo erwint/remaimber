@@ -17,6 +17,7 @@ import (
 
 	"github.com/erwin/remaimber/internal/db"
 	"github.com/erwin/remaimber/internal/gitinfo"
+	"github.com/erwin/remaimber/internal/homedir"
 	"github.com/erwin/remaimber/internal/importer"
 	"github.com/erwin/remaimber/internal/mover"
 	"github.com/erwin/remaimber/internal/segmenter"
@@ -45,8 +46,8 @@ func main() {
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "remaimber",
-		Short: "Archive and search Claude Code conversations",
-		Long: "Archive and search Claude Code conversations.\n\n" +
+		Short: "Archive and search coding-agent conversations",
+		Long: "Archive and search coding-agent conversations — Claude Code, Codex and pi in one archive.\n\n" +
 			"Transcripts are imported into SQLite and indexed, then summarized in segments so a\n" +
 			"long conversation can be recalled — or resumed in part — without reading all of it.",
 		Example: `  # One-time setup: install the import hooks and register the MCP server
@@ -68,7 +69,7 @@ func newRootCmd() *cobra.Command {
 		SilenceUsage: true,
 	}
 
-	root.PersistentFlags().StringVar(&dbPath, "db", "", "Database path (default: ~/.claude/remaimber/remaimber.db, or REMAIMBER_DB env)")
+	root.PersistentFlags().StringVar(&dbPath, "db", "", "Database path (default: ~/.remaimber/remaimber.db, or REMAIMBER_DB env)")
 
 	root.AddCommand(importCmd())
 	root.AddCommand(importIfStaleCmd())
@@ -241,6 +242,96 @@ func importFileCmd() *cobra.Command {
 	return cmd
 }
 
+// mcpAgentHelp documents the MCP `agent` parameter. The default differs from the
+// CLI's on purpose: a person at a terminal is asking about their whole history,
+// while an agent asking through MCP is nearly always looking for its own earlier
+// work, and cross-agent hits are noise until asked for.
+const mcpAgentHelp = "Which agent's conversations to search: defaults to this agent's own; " +
+	"pass \"all\" to search every agent (claude, codex, pi), or name one."
+
+// agentFromClientName maps an MCP client's self-reported name onto an agent.
+func agentFromClientName(name string) string {
+	n := strings.ToLower(name)
+	switch {
+	case strings.Contains(n, "codex"):
+		return importer.AgentCodex
+	case strings.Contains(n, "claude"):
+		return importer.AgentClaude
+	case n == "pi" || strings.HasPrefix(n, "pi-"):
+		return importer.AgentPi
+	}
+	return ""
+}
+
+// callingAgent identifies the agent on the other end of an MCP connection, so a
+// tool can default to that agent's own history. The client's declared name is
+// the reliable signal: environment variables are not, because Codex hands stdio
+// servers a whitelisted environment that need not carry its session id. Returns
+// "" when the client is unrecognised, which means "search everything" — a wrong
+// guess would hide conversations, and silently finding nothing is worse than
+// finding one extra.
+func callingAgent(ctx context.Context) string {
+	if sess, ok := server.ClientSessionFromContext(ctx).(server.SessionWithClientInfo); ok {
+		if a := agentFromClientName(sess.GetClientInfo().Name); a != "" {
+			return a
+		}
+	}
+	// Ordered, not a map: a session nested inside another agent's shell can carry
+	// both variables, and the answer must not depend on map iteration order.
+	for _, e := range []struct{ env, agent string }{
+		{"CODEX_SESSION_ID", importer.AgentCodex},
+		{"CLAUDE_CODE_SESSION_ID", importer.AgentClaude},
+		{"PI_SESSION_ID", importer.AgentPi},
+	} {
+		if os.Getenv(e.env) != "" {
+			return e.agent
+		}
+	}
+	return ""
+}
+
+// mcpAgentScope resolves a tool call's agent filter. Reports whether the scope
+// came from the default, so an empty result can say what was searched.
+func mcpAgentScope(ctx context.Context, req mcp.CallToolRequest) (agent string, defaulted bool, err error) {
+	raw := req.GetString("agent", "")
+	if raw == "" {
+		return callingAgent(ctx), true, nil
+	}
+	agent, err = normalizeAgent(raw)
+	return agent, false, err
+}
+
+// scopeNote explains a default agent scope in an empty result, so the caller
+// learns the widening exists at the moment it would help.
+func scopeNote(agent string, defaulted bool) string {
+	if agent == "" || !defaulted {
+		return ""
+	}
+	return fmt.Sprintf(" — searched %s conversations only; pass agent:\"all\" to search every agent", agent)
+}
+
+// agentFlagHelp documents --agent once, for every command that takes it.
+const agentFlagHelp = "Filter by originating agent: claude, codex or pi (default: all)"
+
+// knownAgents is what an --agent value may name. Rejecting anything else beats
+// silently returning nothing, which is what a typo would otherwise produce.
+var knownAgents = []string{importer.AgentClaude, importer.AgentCodex, importer.AgentPi}
+
+// normalizeAgent validates an agent filter. Empty means every agent.
+func normalizeAgent(agent string) (string, error) {
+	agent = strings.ToLower(strings.TrimSpace(agent))
+	if agent == "" || agent == "all" || agent == "any" {
+		return "", nil
+	}
+	for _, a := range knownAgents {
+		if agent == a {
+			return agent, nil
+		}
+	}
+	return "", fmt.Errorf("unknown agent %q: want one of %s (or omit for all)",
+		agent, strings.Join(knownAgents, ", "))
+}
+
 // hookInput is the JSON Claude Code passes to hooks on stdin.
 type hookInput struct {
 	SessionID string `json:"session_id"`
@@ -382,7 +473,7 @@ func backfillIdentityCmd() *cobra.Command {
 }
 
 func listCmd() *cobra.Command {
-	var project, repo, subpath, since, until string
+	var project, repo, subpath, since, until, agent string
 	var limit int
 	var jsonOut bool
 	cmd := &cobra.Command{
@@ -408,10 +499,16 @@ func listCmd() *cobra.Command {
 			}
 			defer database.Close()
 
+			agent, err := normalizeAgent(agent)
+			if err != nil {
+				return err
+			}
+
 			sessions, err := db.ListSessions(database, db.ListFilter{
 				Project: project,
 				Repo:    repo,
 				Subpath: subpath,
+				Agent:   agent,
 				Since:   since,
 				Until:   until,
 				Limit:   limit,
@@ -465,6 +562,7 @@ func listCmd() *cobra.Command {
 	cmd.Flags().StringVar(&until, "until", "", "Filter sessions starting before this date (ISO 8601)")
 	cmd.Flags().IntVar(&limit, "limit", 20, "Max results")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output as JSON")
+	cmd.Flags().StringVar(&agent, "agent", "", agentFlagHelp)
 	return cmd
 }
 
@@ -490,7 +588,7 @@ func sessionLocation(s types.Session) string {
 }
 
 func searchCmd() *cobra.Command {
-	var project, repo, subpath, role, since, until, excludeSession string
+	var project, repo, subpath, role, since, until, excludeSession, agent string
 	var limit int
 	var jsonOut, includeToolOutput bool
 	cmd := &cobra.Command{
@@ -522,8 +620,20 @@ func searchCmd() *cobra.Command {
 			}
 			defer database.Close()
 
+			if excludeSession == "" {
+				// Searching from inside a session for something that session is
+				// discussing would otherwise rank its own chatter first.
+				excludeSession = liveSessionID()
+			}
+
+			agent, err := normalizeAgent(agent)
+			if err != nil {
+				return err
+			}
+
 			results, err := db.SearchMessages(database, db.SearchFilter{
 				Query:             query,
+				Agent:             agent,
 				Project:           project,
 				Repo:              repo,
 				Subpath:           subpath,
@@ -584,6 +694,7 @@ func searchCmd() *cobra.Command {
 	cmd.Flags().IntVar(&limit, "limit", 20, "Max results")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output as JSON")
 	cmd.Flags().StringVar(&excludeSession, "exclude-session", "", "Exclude this session ID from results")
+	cmd.Flags().StringVar(&agent, "agent", "", agentFlagHelp)
 	return cmd
 }
 
@@ -1006,7 +1117,7 @@ func partialResume(database *sql.DB, prefix, cwd string, gi *gitinfo.Identity,
 	if until != "" {
 		win += " --until " + until
 	}
-	fmt.Printf("\nLoad this slice here:  ask Claude to \"continue session %s segments %s\"\n",
+	fmt.Printf("\nLoad this slice here:  ask your agent to \"continue session %s segments %s\"\n",
 		shortID(sessionID), formatSeqs(sel))
 	fmt.Printf("Print the messages:    remaimber resume %s --segments %s%s --print\n",
 		shortID(sessionID), formatSeqs(sel), win)
@@ -1028,6 +1139,13 @@ func prepareForResume(sess *types.Session, cwd string) (openCmd string, err erro
 		}
 		return fmt.Sprintf("pi --session %s", path), nil
 	}
+	if sess != nil && sess.Agent == importer.AgentCodex {
+		if importer.CodexSessionPath(sess.SessionID) == "" {
+			return "", fmt.Errorf("codex rollout for %s is gone from %s",
+				shortID(sess.SessionID), importer.CodexSessionsDir())
+		}
+		return "codex resume " + sess.SessionID, nil
+	}
 
 	carrierKey, err := mover.CarrierKeyForCWD(cwd)
 	if err != nil {
@@ -1044,7 +1162,13 @@ func prepareForResume(sess *types.Session, cwd string) (openCmd string, err erro
 // would otherwise rank its own chatter above the older conversation being looked
 // for — the request outranking the work.
 func liveSessionID() string {
-	return os.Getenv("CLAUDE_CODE_SESSION_ID")
+	// One variable per agent, since remaimber is called from all of them.
+	for _, env := range []string{"CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "PI_SESSION_ID"} {
+		if id := os.Getenv(env); id != "" {
+			return id
+		}
+	}
+	return ""
 }
 
 // findAcrossSessions answers "find the part where we did X" without being told
@@ -1246,7 +1370,7 @@ func prepareResume(database *sql.DB, prefix, cwd string, gi *gitinfo.Identity) e
 		fmt.Printf("  Branch at capture: %s   (git checkout %s to match)\n\n", sess.GitBranch, sess.GitBranch)
 	}
 	fmt.Printf("  Native resume (new process):  %s\n", openCmd)
-	fmt.Printf("  Continue here (no restart):   ask Claude to \"continue session %s\" — it will load the\n", shortID(sessionID))
+	fmt.Printf("  Continue here (no restart):   ask your agent to \"continue session %s\" — it will load the\n", shortID(sessionID))
 	fmt.Printf("                                context via remaimber and pick up without a restart.\n")
 	return nil
 }
@@ -1396,7 +1520,7 @@ func selectSegments(database *sql.DB, sessionID string, all []db.Segment, match,
 // isLikelyLive reports whether a session's source JSONL was modified very
 // recently, suggesting it is still being written by an active Claude process.
 func isLikelyLive(s *types.Session) bool {
-	home, err := os.UserHomeDir()
+	home, err := homedir.Dir()
 	if err != nil {
 		return false
 	}
@@ -1797,11 +1921,22 @@ To load completions:
 }
 
 func runMCP() error {
-	database, err := openDB()
-	if err != nil {
-		return err
+	// An unopenable archive must not be fatal here. A stdio client that loses the
+	// server before the handshake reports it as a protocol failure — "connection
+	// closed: initialize response" — which says nothing about the actual cause,
+	// and an agent whose MCP server failed to start gives no way to ask. So serve
+	// regardless, and let the tools say what is wrong.
+	database, dbErr := openDB()
+	if dbErr != nil {
+		fmt.Fprintf(os.Stderr, "remaimber: archive unavailable: %v\n", dbErr)
+	} else {
+		defer database.Close()
 	}
-	defer database.Close()
+	unavailable := func() (*mcp.CallToolResult, error) {
+		return mcp.NewToolResultError(fmt.Sprintf(
+			"remaimber archive unavailable: %v — point REMAIMBER_DB at the database, "+
+				"or check that this server's environment can reach the home directory", dbErr)), nil
+	}
 
 	s := server.NewMCPServer("remaimber", "1.0.0",
 		server.WithToolCapabilities(false),
@@ -1809,7 +1944,7 @@ func runMCP() error {
 
 	// search_conversations
 	searchTool := mcp.NewTool("search_conversations",
-		mcp.WithDescription("Search through archived Claude Code conversations using full-text search"),
+		mcp.WithDescription("Search archived conversations (Claude Code, Codex and pi) using full-text search"),
 		mcp.WithString("query", mcp.Required(), mcp.Description("FTS5 search query")),
 		mcp.WithString("project", mcp.Description("Filter by project key (substring match)")),
 		mcp.WithString("role", mcp.Description("Filter by role: user or assistant")),
@@ -1820,14 +1955,23 @@ func runMCP() error {
 		mcp.WithBoolean("include_tool_output", mcp.Description("Also search tool results (command/file output). Off by default: they are machine noise and include this tool's own archived output.")),
 		mcp.WithString("repo", mcp.Description("Filter by repo identity across worktrees ('.' = current repo)")),
 		mcp.WithString("subpath", mcp.Description("Filter by monorepo subpath ('.' = current subpath)")),
+		mcp.WithString("agent", mcp.Description(mcpAgentHelp)),
 	)
 	s.AddTool(searchTool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		if dbErr != nil {
+			return unavailable()
+		}
 		query, _ := req.RequireString("query")
 		repo, subpath, err := resolveRepoSubpath(req.GetString("repo", ""), req.GetString("subpath", ""))
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
+		agent, agentDefaulted, err := mcpAgentScope(ctx, req)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
 		f := db.SearchFilter{
+			Agent:             agent,
 			Query:             query,
 			Project:           req.GetString("project", ""),
 			Repo:              repo,
@@ -1846,6 +1990,10 @@ func runMCP() error {
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
+		if len(results) == 0 {
+			return mcp.NewToolResultText(fmt.Sprintf("no matches for %q%s",
+				query, scopeNote(agent, agentDefaulted))), nil
+		}
 		data, _ := json.MarshalIndent(results, "", "  ")
 		return mcp.NewToolResultText(string(data)), nil
 	})
@@ -1857,6 +2005,9 @@ func runMCP() error {
 		mcp.WithString("types", mcp.Description("Comma-separated message types to include (default: user,assistant)")),
 	)
 	s.AddTool(getSessionTool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		if dbErr != nil {
+			return unavailable()
+		}
 		prefix, _ := req.RequireString("session_id")
 		sessionID, err := db.ResolveSessionID(database, prefix)
 		if err != nil {
@@ -1885,6 +2036,9 @@ func runMCP() error {
 		mcp.WithString("session_id", mcp.Required(), mcp.Description("Session UUID or prefix")),
 	)
 	s.AddTool(getSummaryTool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		if dbErr != nil {
+			return unavailable()
+		}
 		prefix, _ := req.RequireString("session_id")
 		sessionID, err := db.ResolveSessionID(database, prefix)
 		if err != nil {
@@ -1926,6 +2080,9 @@ func runMCP() error {
 		mcp.WithString("until", mcp.Description("End of the time window (ISO 8601)")),
 	)
 	s.AddTool(getSegmentsTool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		if dbErr != nil {
+			return unavailable()
+		}
 		prefix, _ := req.RequireString("session_id")
 		sessionID, err := db.ResolveSessionID(database, prefix)
 		if err != nil {
@@ -2012,8 +2169,12 @@ func runMCP() error {
 		mcp.WithString("since", mcp.Description("Only messages after this time (ISO 8601)")),
 		mcp.WithString("until", mcp.Description("Only messages before this time (ISO 8601)")),
 		mcp.WithString("exclude_session", mcp.Description("Drop a conversation from the results; defaults to the live session so it cannot rank its own discussion of the topic")),
+		mcp.WithString("agent", mcp.Description(mcpAgentHelp)),
 	)
 	s.AddTool(findContextTool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		if dbErr != nil {
+			return unavailable()
+		}
 		topic, _ := req.RequireString("topic")
 		repo, subpath, err := resolveRepoSubpath(req.GetString("repo", ""), req.GetString("subpath", ""))
 		if err != nil {
@@ -2026,17 +2187,22 @@ func runMCP() error {
 
 		importer.ImportAll(database, false)
 
+		agent, agentDefaulted, err := mcpAgentScope(ctx, req)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
 		passages, err := db.FindPassagesAcross(database, topic, db.PassageFilter{
 			Project: req.GetString("project", ""), Repo: repo, Subpath: subpath,
 			Since: req.GetString("since", ""), Until: req.GetString("until", ""),
-			ExcludeSession: exclude,
+			ExcludeSession: exclude, Agent: agent,
 		}, db.PassageOpts{})
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 		if len(passages) == 0 {
-			return mcp.NewToolResultError(fmt.Sprintf("nothing in the archive is about %q (searched terms: %v)",
-				topic, db.QueryTerms(topic))), nil
+			return mcp.NewToolResultError(fmt.Sprintf("nothing in the archive is about %q (searched terms: %v)%s",
+				topic, db.QueryTerms(topic), scopeNote(agent, agentDefaulted))), nil
 		}
 		limit := req.GetInt("limit", 5)
 		if limit > 0 && len(passages) > limit {
@@ -2097,9 +2263,17 @@ func runMCP() error {
 		mcp.WithString("since", mcp.Description("Filter sessions after this date (ISO 8601)")),
 		mcp.WithString("until", mcp.Description("Filter sessions before this date (ISO 8601)")),
 		mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
+		mcp.WithString("agent", mcp.Description(mcpAgentHelp)),
 	)
 	s.AddTool(listSessionsTool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		if dbErr != nil {
+			return unavailable()
+		}
 		repo, subpath, err := resolveRepoSubpath(req.GetString("repo", ""), req.GetString("subpath", ""))
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		agent, agentDefaulted, err := mcpAgentScope(ctx, req)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -2107,6 +2281,7 @@ func runMCP() error {
 			Project: req.GetString("project", ""),
 			Repo:    repo,
 			Subpath: subpath,
+			Agent:   agent,
 			Since:   req.GetString("since", ""),
 			Until:   req.GetString("until", ""),
 			Limit:   req.GetInt("limit", 20),
@@ -2117,6 +2292,9 @@ func runMCP() error {
 		sessions, err := db.ListSessions(database, f)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
+		}
+		if len(sessions) == 0 {
+			return mcp.NewToolResultText("no sessions" + scopeNote(agent, agentDefaulted)), nil
 		}
 		data, _ := json.MarshalIndent(sessions, "", "  ")
 		return mcp.NewToolResultText(string(data)), nil
@@ -2130,6 +2308,9 @@ func runMCP() error {
 		mcp.WithBoolean("copy", mcp.Description("Copy instead of move (default false)")),
 	)
 	s.AddTool(moveConvTool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		if dbErr != nil {
+			return unavailable()
+		}
 		sessionID, _ := req.RequireString("session_id")
 		targetProject, _ := req.RequireString("target_project")
 		copyOnly := req.GetBool("copy", false)
@@ -2152,6 +2333,9 @@ func runMCP() error {
 		mcp.WithString("target_project", mcp.Description("Target project key (default: derived from the server's cwd)")),
 	)
 	s.AddTool(linkTool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		if dbErr != nil {
+			return unavailable()
+		}
 		prefix, _ := req.RequireString("session_id")
 		sessionID, err := db.ResolveSessionID(database, prefix)
 		if err != nil {
@@ -2307,7 +2491,7 @@ func doctorCmd() *cobra.Command {
 			}
 
 			fmt.Println("Archiving")
-			if home, err := os.UserHomeDir(); err == nil {
+			if home, err := homedir.Dir(); err == nil {
 				hooksSeen := false
 				for _, p := range []string{
 					filepath.Join(home, ".claude", "settings.json"),
@@ -2343,13 +2527,20 @@ func doctorCmd() *cobra.Command {
 				}
 				rows.Close()
 			}
-			for _, a := range []string{importer.AgentClaude, importer.AgentPi} {
+			for _, a := range []string{importer.AgentClaude, importer.AgentPi, importer.AgentCodex} {
+				dir := ""
+				switch a {
+				case importer.AgentPi:
+					dir = importer.PiSessionsDir()
+				case importer.AgentCodex:
+					dir = importer.CodexSessionsDir()
+				}
 				switch {
 				case byAgent[a] > 0:
 					ok("%s: %d session(s) archived", a, byAgent[a])
-				case a == importer.AgentPi && importer.PiSessionsDir() != "":
-					if _, err := os.Stat(importer.PiSessionsDir()); err == nil {
-						warn("pi is installed but no sessions archived — run: remaimber import")
+				case dir != "":
+					if _, err := os.Stat(dir); err == nil {
+						warn("%s is installed but no sessions archived — run: remaimber import", a)
 					}
 				}
 			}
@@ -2434,6 +2625,7 @@ func doctorCmd() *cobra.Command {
 func recallCmd() *cobra.Command {
 	var limit int
 	var jsonOut bool
+	var agent string
 	cmd := &cobra.Command{
 		Use:   "recall <topic>",
 		Short: "Search what conversations were about (segment summaries)",
@@ -2453,7 +2645,11 @@ func recallCmd() *cobra.Command {
 			}
 			defer database.Close()
 
-			hits, err := db.SearchSummaries(database, strings.Join(args, " "), limit)
+			agent, err := normalizeAgent(agent)
+			if err != nil {
+				return err
+			}
+			hits, err := db.SearchSummaries(database, strings.Join(args, " "), agent, limit)
 			if err != nil {
 				return err
 			}
@@ -2478,6 +2674,7 @@ func recallCmd() *cobra.Command {
 	}
 	cmd.Flags().IntVar(&limit, "limit", 20, "Max results")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output as JSON")
+	cmd.Flags().StringVar(&agent, "agent", "", agentFlagHelp)
 	return cmd
 }
 

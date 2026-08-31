@@ -1,8 +1,8 @@
 ---
-description: Find a past conversation and resume it in the current worktree
+description: Find a past conversation and resume it in the current worktree, including one from another agent
 ---
 
-Help the user resume a previous Claude Code conversation — including ones that ran in a different git worktree — without making them switch directories.
+Help the user resume a previous conversation — including ones that ran in a different git worktree, or in a different agent — without making them switch directories.
 
 ## How sessions are identified
 
@@ -37,7 +37,7 @@ remaimber resume b2bd8168 --since 2026-08-06T11:18 --until 2026-08-06T11:45   # 
 2. Present the top candidates: session id (first 8 chars), subpath, branch, time span, and summary. If one clearly matches, pick it; otherwise ask.
 3. Decide with the user how to resume:
    - **Partial (usual case):** load the chosen passage's messages, summarize what was done and what's unfinished, `git checkout <branch>` if needed, and continue here. No restart.
-   - **Native full resume:** run `remaimber resume <session-id>` (links the JSONL under the current cwd's project key), then have them run `claude --resume <id>`. Check the branch first. Note this always resumes the *whole* session — partial resume is a way of reading part of it as context, not a smaller transcript.
+   - **Native full resume:** run `remaimber resume <session-id>` and hand the user the command it prints — `claude --resume <id>` for a Claude Code session (that command links the JSONL under the current cwd's project key first), `codex resume <id>`, or `pi --session <path>`. Check the branch first. Note this always resumes the *whole* session — partial resume is a way of reading part of it as context, not a smaller transcript.
 4. Respect the liveness warning: if `remaimber resume` reports the session looks **live** in another worktree, do NOT resume it — warn that it would corrupt the transcript, and suggest closing that session first.
 
 ## Notes

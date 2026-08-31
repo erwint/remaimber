@@ -120,6 +120,7 @@ type PassageFilter struct {
 	Project        string // substring match on project key
 	Repo           string // exact repo identity, across worktrees
 	Subpath        string // exact monorepo subpath
+	Agent          string // exact originating agent ("claude", "codex", "pi")
 	Since          string // ISO 8601 bounds on message timestamps
 	Until          string
 }
@@ -156,7 +157,7 @@ func findPassages(db *sql.DB, query string, f PassageFilter, opts PassageOpts) (
 			substr(COALESCE(m.content_text,''),1,160)
 		FROM messages_fts
 		JOIN messages m ON m.id = messages_fts.rowid`
-	if f.Project != "" || f.Repo != "" || f.Subpath != "" {
+	if f.Project != "" || f.Repo != "" || f.Subpath != "" || f.Agent != "" {
 		q += `
 		JOIN sessions s ON s.session_id = m.session_id
 		LEFT JOIN session_identity si ON si.session_id = m.session_id`
@@ -192,6 +193,10 @@ func findPassages(db *sql.DB, query string, f PassageFilter, opts PassageOpts) (
 	if f.Subpath != "" {
 		q += ` AND si.subpath = ?`
 		args = append(args, f.Subpath)
+	}
+	if f.Agent != "" {
+		q += ` AND ` + agentIs
+		args = append(args, f.Agent)
 	}
 	if f.Since != "" {
 		q += ` AND m.timestamp >= ?`
