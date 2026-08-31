@@ -6,7 +6,7 @@ Every agent's sessions land in the same database, keyed to the same projects, so
 
 ## Install
 
-### From source (requires Go 1.23+)
+### From source (requires Go 1.26+)
 
 ```bash
 go install github.com/erwint/remaimber/cmd/remaimber@latest
@@ -23,7 +23,7 @@ Download the latest binary from [GitHub Releases](https://github.com/erwint/rema
 | Codex | **0.148.0 or newer** — asynchronous command hooks; below that the plugin's maintenance hooks are skipped |
 | Claude Code | any version with plugin or hook support |
 | pi | any version with extension support (0.84+) |
-| Go | 1.23+, to build from source |
+| Go | 1.26+, to build from source (`go.mod` declares 1.26.2) |
 
 ### Setup
 
@@ -124,6 +124,9 @@ When running as an MCP server (`remaimber mcp`), these tools are available:
 
 | Tool | Description |
 |------|-------------|
+| `find_context` | Given a topic in plain words, find the stretch of *any* conversation actually about it — ranked passages with summaries, messages only on request |
+| `get_segments` | Locate the passage inside one known session, or list its segments to choose by summary |
+| `get_summary` | A session's rolling summary plus its per-segment summaries, without reading the messages |
 | `search_conversations` | FTS5 search with project/repo/role/date filters |
 | `get_session` | Retrieve messages from a specific session |
 | `list_sessions` | List sessions with optional filters (incl. `repo`/`subpath`) |
@@ -131,6 +134,8 @@ When running as an MCP server (`remaimber mcp`), these tools are available:
 | `link_session` | Link a session into the current project so it can be resumed here |
 
 `search_conversations` and `list_sessions` accept `repo: "."` and `subpath: "."` to mean "the current repo / subpath", resolved from the server's working directory.
+
+`find_context`, `search_conversations` and `list_sessions` also take `agent`. It defaults to the conversations of whichever agent is calling — identified from the MCP client name — because an agent asking through MCP is nearly always looking for its own earlier work. Pass `agent: "all"` to search every agent, or name one (`claude`, `codex`, `pi`).
 
 ## Agents
 
@@ -209,7 +214,7 @@ Liveness does not depend on a clean `SessionEnd`: a session is considered "still
 
 Coding agents store conversations as JSONL files — `~/.claude/projects/` for Claude Code, `~/.codex/sessions/` for Codex, `~/.pi/agent/sessions/` for pi. Those files get pruned on a retention schedule and are destroyed by compaction.
 
-remaimber archives everything into `~/.claude/remaimber/remaimber.db` with:
+remaimber archives everything into `~/.remaimber/remaimber.db` with:
 - **Full conversation memory** — stores all JSONL line types, not filtered
 - **FTS5 search** — porter stemming, date/role/project filtering
 - **UUID + content-hash dedup** — safe concurrent imports, no duplicates

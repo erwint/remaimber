@@ -17,6 +17,7 @@ make test     # runs all tests
 - `internal/db/` — SQLite connection, schema, queries
 - `internal/importer/` — JSONL scanning, parsing, importing (one file per agent:
   `parser.go`/`scanner.go` for Claude Code, `pi.go`, `codex.go`)
+- `internal/homedir/` — home resolution that survives a scrubbed environment
 - `internal/mover/` — move/copy conversations between projects
 - `internal/setup/` — Claude Code settings.json configuration
 - `internal/types/` — shared type definitions

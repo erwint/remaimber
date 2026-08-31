@@ -53,9 +53,12 @@ func newRootCmd() *cobra.Command {
 		Example: `  # One-time setup: install the import hooks and register the MCP server
   remaimber setup
 
-  # Find something you discussed before
+  # Find something you discussed before, in any agent's conversations
   remaimber search mail-relay
   remaimber list --repo .
+
+  # Narrow to one agent (claude, codex, pi); omit for all of them
+  remaimber list --agent codex
 
   # Pull back just the part of a past conversation you need
   remaimber resume --match 'the part where we set up a mail relay on the nas'
@@ -491,7 +494,10 @@ func listCmd() *cobra.Command {
   remaimber list --repo .
 
   # This subpath of a monorepo, last month, as JSON
-  remaimber list --repo . --subpath . --since 2026-07-01 --json`,
+  remaimber list --repo . --subpath . --since 2026-07-01 --json
+
+  # Only Codex sessions
+  remaimber list --agent codex`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			repo, subpath, err := resolveRepoSubpath(repo, subpath)
 			if err != nil {
@@ -608,6 +614,9 @@ func searchCmd() *cobra.Command {
 
   # Narrow to this repo, to what you said, and to a date range
   remaimber search postfix --repo . --role user --since 2026-08-01
+
+  # Only what Codex did
+  remaimber search apply_patch --agent codex
 
   # Search command output too (off by default as machine noise)
   remaimber search 'exit status 1' --include-tool-output`,
@@ -2656,7 +2665,10 @@ func recallCmd() *cobra.Command {
   remaimber recall 'smtp relay on the nas'
 
   # More results, as JSON
-  remaimber recall 'flaky tests' --limit 10 --json`,
+  remaimber recall 'flaky tests' --limit 10 --json
+
+  # Only what one agent worked on
+  remaimber recall 'flaky tests' --agent claude`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			database, err := openDB()
