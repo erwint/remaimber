@@ -16,6 +16,15 @@ go install github.com/erwint/remaimber/cmd/remaimber@latest
 
 Download the latest binary from [GitHub Releases](https://github.com/erwint/remaimber/releases).
 
+### Requirements
+
+| | version |
+|---|---|
+| Codex | **0.148.0 or newer** — asynchronous command hooks; below that the plugin's maintenance hooks are skipped |
+| Claude Code | any version with plugin or hook support |
+| pi | any version with extension support (0.84+) |
+| Go | 1.23+, to build from source |
+
 ### Setup
 
 `remaimber import` works on its own — it reads every agent's transcripts off disk.
@@ -36,10 +45,12 @@ as a plugin — same hooks, plus the `/rmb:recall`, `/rmb:resume` and
 
 #### Codex
 
-Requires **Codex 0.148.0 or newer** (verified on 0.151.0). Asynchronous command
-hooks arrived in 0.148.0; older versions log `skipping async hooks, not supported
-yet` and run the rest, so the archive still gets written before a compaction but
-the background maintenance sweeps and the auto-install never fire.
+> **Requires Codex 0.148.0 or newer.** Verified on 0.151.0.
+
+Asynchronous command hooks arrived in 0.148.0. On 0.147 and older, Codex logs
+`skipping async hooks, not supported yet` and runs the rest: the archive is still
+written before a compaction, but the background maintenance sweeps and the
+auto-install never fire — a failure that looks like nothing happening at all.
 
 ```bash
 codex plugin marketplace add erwint/remaimber

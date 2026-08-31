@@ -1,6 +1,6 @@
 {
   "name": "rmb",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Search and recall archived Codex, Claude Code and pi conversations",
   "author": {
     "name": "erwint",
@@ -20,7 +20,7 @@
   "interface": {
     "displayName": "remaimber",
     "shortDescription": "Recall past conversations across agents",
-    "longDescription": "Archives every Codex, Claude Code and pi conversation into a local SQLite database with full-text search, then makes them findable: search exact strings, recall a topic by what the work turned out to be, or pull back just the part of an old session that matters and resume from it.",
+    "longDescription": "Requires Codex 0.148.0 or newer. Archives every Codex, Claude Code and pi conversation into a local SQLite database with full-text search, then makes them findable: search exact strings, recall a topic by what the work turned out to be, or pull back just the part of an old session that matters and resume from it.",
     "developerName": "erwint",
     "category": "Productivity",
     "capabilities": [

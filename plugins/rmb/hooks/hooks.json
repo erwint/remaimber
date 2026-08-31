@@ -1,5 +1,5 @@
 {
-  "description": "remaimber: archive this conversation so it stays searchable after Codex prunes or compacts it.",
+  "description": "remaimber (needs Codex >= 0.148.0): archive this conversation so it stays searchable after Codex prunes or compacts it.",
   "hooks": {
     "SessionStart": [
       {
