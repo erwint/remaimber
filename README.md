@@ -99,10 +99,11 @@ itself first — the extension calls it and stays quiet when it's absent.
 # Import all conversations
 remaimber import
 
-# Search conversations
+# Search conversations (every agent by default)
 remaimber search "sqlite configuration"
 remaimber search "auth" --role user --since 2026-01-01
 remaimber search "recipe import" --repo .   # only this repo, across all worktrees
+remaimber search "apply_patch" --agent codex  # only one agent's conversations
 
 # List sessions
 remaimber list
@@ -127,6 +128,9 @@ remaimber move <session-id> <target-project> --copy
 remaimber summarize                         # summarize sessions with new activity
 remaimber summarize <session-id> --force    # rebuild one session's summary
 
+# What is wired up, what is stuck, what failed quietly
+remaimber doctor
+
 # Database management
 remaimber stats
 remaimber verify
@@ -139,7 +143,10 @@ remaimber completion zsh > "${fpath[1]}/_remaimber"
 
 ## MCP Tools
 
-When running as an MCP server (`remaimber mcp`), these tools are available:
+When running as an MCP server (`remaimber mcp`), these tools are available. Hosts
+namespace them by server, so an agent sees `mcp__remaimber__find_context` and so
+on; `remaimber setup` or either plugin registers the server, and
+`remaimber doctor` says whether it is reachable.
 
 | Tool | Description |
 |------|-------------|

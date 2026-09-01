@@ -19,19 +19,33 @@ make test     # runs all tests
   `parser.go`/`scanner.go` for Claude Code, `pi.go`, `codex.go`)
 - `internal/homedir/` — home resolution that survives a scrubbed environment
 - `internal/mover/` — move/copy conversations between projects
-- `internal/setup/` — Claude Code settings.json configuration
+- `internal/setup/` — Claude Code configuration, and the per-agent status report
 - `internal/types/` — shared type definitions
 
 ## Agent integrations
 
-- `.claude-plugin/` + `commands/` + `hooks/` — Claude Code plugin (repo root is
-  the plugin root)
+- `.claude-plugin/` + `commands/` + `hooks/` + `.mcp.json` — Claude Code plugin
+  (repo root is the plugin root)
 - `plugins/rmb/` + `.agents/plugins/marketplace.json` — Codex plugin; its
   `skills/` are shared with pi
 - `package.json` (`pi` manifest) + `pi/extensions/` — pi package
 
 Bump `version` in `plugins/rmb/.codex-plugin/plugin.json` when the Codex plugin
-changes: Codex caches an installed plugin by version.
+changes: Codex caches an installed plugin by version. Both plugins have a
+validator worth running — `claude plugin validate .` and the plugin-creator
+skill's `validate_plugin.py` for Codex.
+
+`remaimber setup` writes Claude Code's config only. The other two install a
+plugin and a package through their own tooling, so setup reports their state
+instead of writing it (`internal/setup/agents.go`); `doctor` prints the same
+report.
+
+**Claude Code does not read `mcpServers` from `settings.json`.** User-scope MCP
+servers live in `~/.claude.json`, which `claude mcp add --scope user` owns — that
+file also holds Claude Code's own state, so it is not ours to rewrite. A server
+written into settings.json is silently inert, which is how the search tools went
+missing for months without a symptom other than an agent saying the tool does not
+exist.
 
 The Codex plugin needs Codex ≥ 0.148.0, where asynchronous command hooks landed.
 Below that the async hooks are skipped with `skipping async hooks, not supported
