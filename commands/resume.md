@@ -12,7 +12,7 @@ remaimber captures a durable identity for every session at start: `repo_id` (sta
 
 Sessions here run to thousands of messages. When the user names a topic — "resume X, but only the part where we did Y" — do **not** load the whole conversation. Find the passage instead.
 
-Prefer the `find_context` MCP tool when the conversation itself is uncertain, and `get_segments` when a session id is already known:
+Prefer the `find_context` MCP tool when the conversation itself is uncertain, and `get_segments` when a session id is already known. The host namespaces them, so they are `mcp__remaimber__find_context` and `mcp__remaimber__get_segments`; a lookup for the bare name finds nothing:
 
 - `find_context` takes `topic` in plain words and searches every conversation, returning ranked passages with session, time span and segment summaries. Use it first when the user describes work without naming a session.
 - `get_segments` takes `session_id` plus `match` and locates the passage inside that one conversation. Without `match`, it lists every segment so you can choose by summary.

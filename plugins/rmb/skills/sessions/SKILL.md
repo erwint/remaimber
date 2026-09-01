@@ -22,8 +22,8 @@ Use `--json` to get structured output — each entry includes `summary`, `agent`
 ## Scoping to one agent
 
 The archive spans agents, and the two entry points default differently. The MCP
-tools (`find_context`, `list_sessions`, `search_conversations`) search **this
-agent's own conversations** unless told otherwise — pass `agent: "all"` to search
+tools (namespaced by host, so `mcp__remaimber__find_context` and friends) search
+**this agent's own conversations** unless told otherwise — pass `agent: "all"` to search
 every agent, or name one (`claude`, `codex`, `pi`). The CLI is the other way
 round: it searches everything, and `--agent <name>` narrows it.
 

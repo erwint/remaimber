@@ -14,6 +14,11 @@ remaimber MCP tools (`find_context`, `get_segments`, `get_session`), prefer them
 for the first two lookups: same data, fewer round trips, and they return
 structured results.
 
+Hosts namespace MCP tools by server, so they appear as
+`mcp__remaimber__find_context`, `mcp__remaimber__get_segments` and so on. The
+bare names used below are the short form; if a lookup for the bare name finds
+nothing, the tool is probably there under the namespaced one.
+
 ## Pick the right lookup for what they remember
 
 Three lookups exist, and they fail in different ways. Choose by what the user
@@ -54,7 +59,7 @@ turned out to be even when nobody typed those words together.
 ## Scoping to one agent
 
 The archive spans agents, and the two entry points default differently. The MCP
-tools (`find_context`, `list_sessions`, `search_conversations`) search **this
+tools (`mcp__remaimber__find_context` and friends) search **this
 agent's own conversations** unless told otherwise — pass `agent: "all"` to search
 every agent, or name one (`claude`, `codex`, `pi`). The CLI is the other way
 round: it searches everything, and `--agent <name>` narrows it.

@@ -13,6 +13,11 @@ Everything below is `remaimber`, a CLI on PATH. If this agent also exposes the
 remaimber MCP tools (`find_context`, `get_segments`, `get_session`), prefer them
 for locating the passage: same data, structured results.
 
+Hosts namespace MCP tools by server, so they appear as
+`mcp__remaimber__find_context`, `mcp__remaimber__get_segments` and so on. The
+bare names used below are the short form; if a lookup for the bare name finds
+nothing, the tool is probably there under the namespaced one.
+
 ## How sessions are identified
 
 remaimber captures a durable identity for every session at start: `repo_id`

@@ -10,7 +10,7 @@ is findable here.
 
 Three lookups exist, and they fail in different ways. Choose by what the user actually said.
 
-**They remember roughly what happened, not the wording** — "the part where we set up a mail relay on the nas", "when we fixed the flaky tests". Use the `find_context` MCP tool with their phrasing as `topic`. It searches every conversation, ranks passages (contiguous stretches actually about the topic), and returns each with its session, time span and segment summaries. This is the default for a described memory: it handles prose, filler words and hyphenation, and it excludes the live session so the current conversation cannot rank its own discussion of the topic.
+**They remember roughly what happened, not the wording** — "the part where we set up a mail relay on the nas", "when we fixed the flaky tests". Use the `find_context` MCP tool (namespaced by the host as `mcp__remaimber__find_context`) with their phrasing as `topic`. It searches every conversation, ranks passages (contiguous stretches actually about the topic), and returns each with its session, time span and segment summaries. This is the default for a described memory: it handles prose, filler words and hyphenation, and it excludes the live session so the current conversation cannot rank its own discussion of the topic.
 
 **They remember an exact string** — an error message, a flag, a function name. Use `remaimber search`, which matches literal message text:
 
