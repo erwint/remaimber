@@ -3,5 +3,16 @@
   "description": "Search and recall archived Claude Code, Codex and pi conversations",
   "version": "1.2.0",
   "homepage": "https://github.com/erwint/remaimber",
-  "mcpServers": "./.mcp.json"
+  "mcpServers": "./.mcp.json",
+  "author": {
+    "name": "erwint",
+    "url": "https://github.com/erwint"
+  },
+  "license": "MIT",
+  "keywords": [
+    "search",
+    "conversations",
+    "archive",
+    "memory"
+  ]
 }

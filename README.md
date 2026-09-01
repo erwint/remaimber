@@ -50,10 +50,17 @@ to `~/.claude/settings.json`, and registers the MCP server with
 `~/.claude.json`, never from `settings.json`, so a server written into the latter
 is silently inert. Restart Claude Code afterwards to pick the tools up.
 
-Alternatively install this repo as a plugin — same hooks and MCP server, plus the
-`/rmb:recall`, `/rmb:resume` and `/rmb:sessions` commands. The plugin bundles the
-MCP server from v1.2.0; an older installed copy provides the commands but no
-search tools, which `remaimber doctor` now reports.
+Or install it as a plugin instead — same hooks and MCP server, plus the
+`/rmb:recall`, `/rmb:resume` and `/rmb:sessions` commands:
+
+```bash
+claude plugin marketplace add erwint/remaimber
+claude plugin install rmb@remaimber
+```
+
+The plugin bundles the MCP server from v1.2.0. An older installed copy provides
+the commands but no search tools — `claude plugin update rmb@remaimber` fixes
+that, and `remaimber doctor` says so when it applies.
 
 #### Codex
 

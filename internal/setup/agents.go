@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -57,8 +58,42 @@ func claudeStatus(home string) AgentStatus {
 	s := AgentStatus{Name: "claude", Installed: dirExists(filepath.Join(home, ".claude"))}
 	inUserConfig, viaPlugin := MCPStatus(home)
 	s.Wired = inUserConfig || viaPlugin
-	s.Next = []string{"remaimber setup"}
+	s.Next = []string{
+		"remaimber setup",
+		"or install the plugin instead:",
+		"  claude plugin marketplace add erwint/remaimber",
+		"  claude plugin install rmb@remaimber",
+	}
+	// A plugin installed before the MCP server was bundled provides the commands
+	// and nothing else, and updating it is a different command from installing.
+	if !s.Wired && pluginInstalled(home) {
+		s.Next = []string{
+			"claude plugin update rmb@remaimber   (the installed copy predates the bundled MCP server)",
+			"or: remaimber setup",
+		}
+	}
 	return s
+}
+
+// pluginInstalled reports whether an rmb plugin is installed at all, regardless
+// of what it carries.
+func pluginInstalled(home string) bool {
+	data, err := os.ReadFile(filepath.Join(home, ".claude", "plugins", "installed_plugins.json"))
+	if err != nil {
+		return false
+	}
+	var cfg struct {
+		Plugins map[string]any `json:"plugins"`
+	}
+	if json.Unmarshal(data, &cfg) != nil {
+		return false
+	}
+	for name := range cfg.Plugins {
+		if strings.HasPrefix(name, "rmb@") {
+			return true
+		}
+	}
+	return false
 }
 
 // codexStatus reads config.toml rather than asking Codex, so that setup stays a
