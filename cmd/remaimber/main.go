@@ -1887,7 +1887,11 @@ func setupCmd() *cobra.Command {
   remaimber setup`,
 		Short: "Configure Claude Code settings (hooks + MCP server)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return setup.Run()
+			if err := setup.Run(); err != nil {
+				return err
+			}
+			setup.RegisterMCP()
+			return nil
 		},
 	}
 }
@@ -2529,6 +2533,25 @@ func doctorCmd() *cobra.Command {
 					ok("import hooks are configured")
 				default:
 					warn("no remaimber hooks found in settings.json and the plugin is not enabled — run: remaimber setup")
+				}
+
+				// The search tools are registered separately from the hooks, and
+				// in a different file: Claude Code reads user-scope MCP servers
+				// from ~/.claude.json, never from settings.json. A server that is
+				// only in settings.json is invisible, and the only symptom is an
+				// agent reporting that find_context does not exist.
+				inUserConfig, viaPlugin := setup.MCPStatus(home)
+				switch {
+				case inUserConfig:
+					ok("MCP search tools are registered")
+				case viaPlugin:
+					ok("MCP search tools ship with the installed rmb plugin")
+				default:
+					warn("the MCP search tools are not registered — run: remaimber setup " +
+						"(or: claude mcp add --scope user remaimber -- remaimber mcp)")
+					if pluginHooks {
+						warn("the rmb plugin is enabled but predates the bundled MCP server — update it")
+					}
 				}
 			}
 

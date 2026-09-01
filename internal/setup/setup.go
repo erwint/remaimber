@@ -4,13 +4,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/erwint/remaimber/internal/homedir"
 )
 
-// Run configures ~/.claude/settings.json with remaimber hooks and MCP server.
+// Run configures Claude Code: hooks in settings.json, and the MCP server where
+// Claude Code actually looks for one.
 func Run() error {
 	home, err := homedir.Dir()
 	if err != nil {
@@ -32,8 +34,10 @@ func Run() error {
 	// Configure hooks
 	configureHooks(settings)
 
-	// Configure MCP server
-	configureMCP(settings)
+	// Drop the MCP block earlier versions wrote here. Claude Code does not read
+	// mcpServers from settings.json — the server has to be registered in
+	// ~/.claude.json — so that block never did anything except look like it had.
+	dropStaleMCP(settings)
 
 	// Write back
 	out, err := json.MarshalIndent(settings, "", "  ")
@@ -145,22 +149,109 @@ func configureHooks(settings map[string]any) {
 	}
 }
 
-func configureMCP(settings map[string]any) {
+// dropStaleMCP removes the inert mcpServers entry earlier versions wrote into
+// settings.json. Left there it is worse than nothing: it reads as a registered
+// server while `claude mcp list` shows none, which is how the search tools went
+// missing without anyone noticing.
+func dropStaleMCP(settings map[string]any) {
 	mcpServers, _ := settings["mcpServers"].(map[string]any)
 	if mcpServers == nil {
-		mcpServers = make(map[string]any)
-		settings["mcpServers"] = mcpServers
+		return
 	}
+	if _, found := mcpServers["remaimber"]; !found {
+		return
+	}
+	delete(mcpServers, "remaimber")
+	if len(mcpServers) == 0 {
+		delete(settings, "mcpServers")
+	}
+	fmt.Println("Removed the inert \"remaimber\" entry from settings.json (Claude Code never read it)")
+}
 
-	_, existed := mcpServers["remaimber"]
-	mcpServers["remaimber"] = map[string]any{
-		"command": "remaimber",
-		"args":    []any{"mcp"},
+// mcpRegistered reports whether Claude Code has the server in its user config.
+func mcpRegistered(home string) bool {
+	data, err := os.ReadFile(filepath.Join(home, ".claude.json"))
+	if err != nil {
+		return false
 	}
+	var cfg struct {
+		MCPServers map[string]any `json:"mcpServers"`
+	}
+	if json.Unmarshal(data, &cfg) != nil {
+		return false
+	}
+	_, found := cfg.MCPServers["remaimber"]
+	return found
+}
 
-	if existed {
-		fmt.Println("Updated MCP server \"remaimber\"")
-	} else {
-		fmt.Println("Added MCP server \"remaimber\"")
+// MCPStatus reports how Claude Code can reach the MCP server: registered in the
+// user config, or shipped by an installed plugin. Both false means the search
+// tools are simply absent — a state that has no symptom until an agent says the
+// tool does not exist, so it is worth naming explicitly.
+func MCPStatus(home string) (userConfig, viaPlugin bool) {
+	return mcpRegistered(home), pluginShipsMCP(home)
+}
+
+// pluginShipsMCP reports whether an installed rmb plugin carries an .mcp.json.
+// Enabled is not enough: a plugin installed before the server was bundled is
+// enabled and current-looking while providing no tools at all.
+func pluginShipsMCP(home string) bool {
+	data, err := os.ReadFile(filepath.Join(home, ".claude", "plugins", "installed_plugins.json"))
+	if err != nil {
+		return false
 	}
+	var cfg struct {
+		Plugins map[string][]struct {
+			InstallPath string `json:"installPath"`
+		} `json:"plugins"`
+	}
+	if json.Unmarshal(data, &cfg) != nil {
+		return false
+	}
+	for name, installs := range cfg.Plugins {
+		if !strings.HasPrefix(name, "rmb@") {
+			continue
+		}
+		for _, in := range installs {
+			if in.InstallPath == "" {
+				continue
+			}
+			if _, err := os.Stat(filepath.Join(in.InstallPath, ".mcp.json")); err == nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// RegisterMCP adds the server to Claude Code's user config, through the CLI that
+// owns that file. ~/.claude.json holds Claude Code's own state as well, so it is
+// not ours to rewrite by hand. Kept out of Run so that configuring files and
+// invoking another program stay separable — the second is not something a test
+// should trigger.
+func RegisterMCP() {
+	home, err := homedir.Dir()
+	if err != nil {
+		return
+	}
+	if mcpRegistered(home) {
+		fmt.Println("MCP server \"remaimber\" already registered")
+		return
+	}
+	if _, err := exec.LookPath("claude"); err != nil {
+		fmt.Println("The `claude` CLI is not on PATH, so the MCP search tools were not registered.")
+		fmt.Println("Run this once it is available:  claude mcp add --scope user remaimber -- remaimber mcp")
+		return
+	}
+	out, err := exec.Command("claude", "mcp", "add", "--scope", "user",
+		"remaimber", "--", "remaimber", "mcp").CombinedOutput()
+	if err != nil {
+		fmt.Printf("Could not register the MCP server (%v). Run it by hand:\n", err)
+		fmt.Println("  claude mcp add --scope user remaimber -- remaimber mcp")
+		if msg := strings.TrimSpace(string(out)); msg != "" {
+			fmt.Printf("  %s\n", msg)
+		}
+		return
+	}
+	fmt.Println("Registered MCP server \"remaimber\" (restart Claude Code to pick it up)")
 }

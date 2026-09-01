@@ -54,15 +54,49 @@ func TestRun_FreshSettings(t *testing.T) {
 		}
 	}
 
-	// Check MCP server
-	mcpServers := settings["mcpServers"].(map[string]any)
-	remaimber := mcpServers["remaimber"].(map[string]any)
-	if remaimber["command"] != "remaimber" {
-		t.Errorf("mcp command = %v, want 'remaimber'", remaimber["command"])
+	// Claude Code reads user-scope MCP servers from ~/.claude.json, never from
+	// settings.json, so setup must not leave a block here that looks registered.
+	if _, found := settings["mcpServers"]; found {
+		t.Error("settings.json still carries an mcpServers block Claude Code will not read")
 	}
-	args := remaimber["args"].([]any)
-	if len(args) != 1 || args[0] != "mcp" {
-		t.Errorf("mcp args = %v, want ['mcp']", args)
+}
+
+// An installation configured by an older version carries the inert block. Setup
+// has to clear it: left in place it reads as a registered server while
+// `claude mcp list` shows none, which is exactly how the search tools went
+// missing without anyone noticing.
+func TestRun_RemovesInertMCPBlock(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	settingsPath := filepath.Join(home, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	prior := `{"mcpServers":{"remaimber":{"command":"remaimber","args":["mcp"]},
+		"other":{"command":"other"}}}`
+	if err := os.WriteFile(settingsPath, []byte(prior), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	var settings map[string]any
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatal(err)
+	}
+	servers, _ := settings["mcpServers"].(map[string]any)
+	if _, found := servers["remaimber"]; found {
+		t.Error("the inert remaimber entry survived setup")
+	}
+	// Somebody else's server is not ours to remove.
+	if _, found := servers["other"]; !found {
+		t.Error("setup removed an unrelated MCP server")
 	}
 }
 

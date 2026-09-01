@@ -38,10 +38,16 @@ worktree still exists, and giving the agent the search tools.
 remaimber setup
 ```
 
-This adds the hooks (`SessionStart`, `PreCompact`, `Notification`, `SessionEnd`)
-and the MCP server to `~/.claude/settings.json`. Alternatively install this repo
-as a plugin — same hooks, plus the `/rmb:recall`, `/rmb:resume` and
-`/rmb:sessions` commands.
+This writes the hooks (`SessionStart`, `PreCompact`, `Notification`, `SessionEnd`)
+to `~/.claude/settings.json`, and registers the MCP server with
+`claude mcp add --scope user` — Claude Code reads user-scope MCP servers from
+`~/.claude.json`, never from `settings.json`, so a server written into the latter
+is silently inert. Restart Claude Code afterwards to pick the tools up.
+
+Alternatively install this repo as a plugin — same hooks and MCP server, plus the
+`/rmb:recall`, `/rmb:resume` and `/rmb:sessions` commands. The plugin bundles the
+MCP server from v1.2.0; an older installed copy provides the commands but no
+search tools, which `remaimber doctor` now reports.
 
 #### Codex
 
