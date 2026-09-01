@@ -32,6 +32,12 @@ Wiring it into an agent adds the parts a scheduled import can't do: archiving
 *before* `/compact` destroys data, capturing a session's repo identity while its
 worktree still exists, and giving the agent the search tools.
 
+`remaimber setup` configures **Claude Code only**. Codex and pi install a plugin
+and a package, owned by their own tooling, so setup does not write those — it
+ends by naming every agent it finds and printing what each still needs.
+`remaimber doctor` reports the same, so a half-wired machine is visible without
+running setup again.
+
 #### Claude Code
 
 ```bash

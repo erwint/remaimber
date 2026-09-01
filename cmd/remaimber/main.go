@@ -1883,14 +1883,20 @@ func verifyCmd() *cobra.Command {
 func setupCmd() *cobra.Command {
 	return &cobra.Command{
 		Use: "setup",
-		Example: `  # Wire up the import hooks and register the MCP server
+		Example: `  # Wire up Claude Code, and report what the other agents still need
   remaimber setup`,
-		Short: "Configure Claude Code settings (hooks + MCP server)",
+		Short: "Configure Claude Code (hooks + MCP server), and report the other agents",
+		Long: "Configure Claude Code: import hooks in settings.json, and the MCP server\n" +
+			"registered where Claude Code reads it.\n\n" +
+			"Codex and pi are installed as a plugin and a package, owned by their own\n" +
+			"tooling, so setup does not write those itself — it reports whether they are\n" +
+			"wired up and prints the commands that finish the job.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := setup.Run(); err != nil {
 				return err
 			}
 			setup.RegisterMCP()
+			setup.ReportAgents()
 			return nil
 		},
 	}
@@ -2595,6 +2601,11 @@ func doctorCmd() *cobra.Command {
 			} else {
 				ok("last import %s", lastImport[:min(len(lastImport), 16)])
 			}
+
+			// Which agents are installed but not wired up. The archive counts above
+			// answer a different question: they say what has been imported, not
+			// whether an agent is set up to keep feeding it.
+			setup.ReportAgents()
 
 			fmt.Println("\nSummarization")
 			c, err := db.GetSummaryCoverage(database)
