@@ -50,6 +50,11 @@ written into settings.json is silently inert, which is how the search tools went
 missing for months without a symptom other than an agent saying the tool does not
 exist.
 
+There is no Codex equivalent of `commands/`: custom prompts are deprecated and
+live only in `~/.codex/prompts`, so nothing shippable can provide a slash
+command. Skills are the sanctioned replacement — `$rmb:recall` mentions one
+directly, and the model can load it implicitly from its description.
+
 The Codex plugin needs Codex ≥ 0.148.0, where asynchronous command hooks landed.
 Below that the async hooks are skipped with `skipping async hooks, not supported
 yet`. Dropping `"async": true` for shell backgrounding (`... &`, as the Claude
