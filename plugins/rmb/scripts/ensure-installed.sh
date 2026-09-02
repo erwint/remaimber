@@ -25,9 +25,61 @@ for candidate in "${HOME}/.local/bin" "${HOME}/bin" "/usr/local/bin"; do
 done
 INSTALL_DIR="${INSTALL_DIR:-${HOME}/.local/bin}"
 
+# The binary is no use to the person typing commands if the shell cannot find
+# it. Hooks and the MCP server reach it by absolute path, so this is invisible
+# until someone tries to run it — which is why it is fixed rather than reported.
+# One marked line, appended once, declinable with REMAIMBER_NO_PATH_EDIT=1.
+ensure_on_path() {
+  case ":${PATH}:" in
+    *":${INSTALL_DIR}:"*) return 0 ;;
+  esac
+
+  if [ -n "${REMAIMBER_NO_PATH_EDIT:-}" ]; then
+    echo "remaimber: ${INSTALL_DIR} is not on your PATH; add it yourself:" >&2
+    echo "           export PATH=\"${INSTALL_DIR}:\$PATH\"" >&2
+    return 0
+  fi
+
+  shell="${SHELL:-}"
+  if [ -z "$shell" ] && [ "$(uname -s)" = "Darwin" ]; then
+    shell="$(dscl . -read "/Users/$(id -un)" UserShell 2>/dev/null | awk '{print $2}')"
+  fi
+  case "$shell" in
+    */zsh)  profile="${ZDOTDIR:-$HOME}/.zshrc" ;;
+    */bash) if [ "$(uname -s)" = "Darwin" ]; then profile="${HOME}/.bash_profile"; else profile="${HOME}/.bashrc"; fi ;;
+    *)      profile="" ;;
+  esac
+
+  if [ -z "$profile" ]; then
+    echo "remaimber: ${INSTALL_DIR} is not on your PATH, and your shell is not one this" >&2
+    echo "           script edits. Add the equivalent of:" >&2
+    echo "           export PATH=\"${INSTALL_DIR}:\$PATH\"" >&2
+    return 0
+  fi
+
+  if [ -f "$profile" ] && grep -q "added by remaimber" "$profile"; then
+    return 0 # already there; a second line would just accumulate
+  fi
+
+  printf '\n# added by remaimber\nexport PATH="%s:$PATH"\n' "$INSTALL_DIR" >> "$profile"
+  echo "remaimber: added ${INSTALL_DIR} to your PATH in ${profile} — open a new shell to use it"
+}
+
+# Already reachable: nothing to do.
 if command -v remaimber &>/dev/null; then
   exit 0
 fi
+
+# Installed, but where the shell will not look — the state a machine lands in
+# when a previous install picked a directory that is not on PATH. Fix the PATH
+# rather than downloading a copy that would be just as unreachable.
+for dir in "${HOME}/.local/bin" "${HOME}/bin" "/usr/local/bin"; do
+  if [ -x "${dir}/remaimber" ]; then
+    INSTALL_DIR="$dir"
+    ensure_on_path
+    exit 0
+  fi
+done
 
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 ARCH="$(uname -m)"
@@ -55,44 +107,4 @@ chmod +x "${INSTALL_DIR}/remaimber"
 # pi as well, which is not a Claude Code hook's business.
 
 echo "remaimber ${LATEST} installed to ${INSTALL_DIR}/remaimber"
-
-# Nothing on the PATH was usable, so the binary landed somewhere the shell will
-# not find. Archiving still works — the hooks and the MCP server look here
-# directly — but every documented command would fail for the person typing it,
-# so add the directory to their shell profile. One marked line, appended once,
-# and skippable with REMAIMBER_NO_PATH_EDIT=1.
-case ":${PATH}:" in
-  *":${INSTALL_DIR}:"*) exit 0 ;;
-esac
-
-if [ -n "${REMAIMBER_NO_PATH_EDIT:-}" ]; then
-  echo "remaimber: ${INSTALL_DIR} is not on your PATH; add it yourself:" >&2
-  echo "           export PATH=\"${INSTALL_DIR}:\$PATH\"" >&2
-  exit 0
-fi
-
-shell="${SHELL:-}"
-if [ -z "$shell" ] && [ "$(uname -s)" = "Darwin" ]; then
-  shell="$(dscl . -read "/Users/$(id -un)" UserShell 2>/dev/null | awk '{print $2}')"
-fi
-case "$shell" in
-  */zsh)  profile="${ZDOTDIR:-$HOME}/.zshrc" ;;
-  */bash) if [ "$(uname -s)" = "Darwin" ]; then profile="${HOME}/.bash_profile"; else profile="${HOME}/.bashrc"; fi ;;
-  *)      profile="" ;;
-esac
-
-if [ -z "$profile" ]; then
-  echo "remaimber: ${INSTALL_DIR} is not on your PATH, and your shell is not one this" >&2
-  echo "           script edits. Add the equivalent of:" >&2
-  echo "           export PATH=\"${INSTALL_DIR}:\$PATH\"" >&2
-  exit 0
-fi
-
-if [ -f "$profile" ] && grep -q "added by remaimber" "$profile"; then
-  exit 0 # already there; a second line would just accumulate
-fi
-
-{
-  printf '\n# added by remaimber\nexport PATH="%s:$PATH"\n' "$INSTALL_DIR"
-} >> "$profile"
-echo "remaimber: added ${INSTALL_DIR} to your PATH in ${profile} — open a new shell to use it"
+ensure_on_path
