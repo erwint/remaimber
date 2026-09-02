@@ -11,75 +11,67 @@ resumable from another.
 
 ## Install
 
-Two steps: the CLI, then whichever agents you use. The CLI does the work; the
-agent integrations call it at the right moments.
+Two routes, and either one is complete on its own.
 
-### 1. The CLI
+### From an agent
 
-```bash
-go install github.com/erwint/remaimber/cmd/remaimber@latest   # needs Go 1.26+
-```
-
-Or download a binary from [Releases](https://github.com/erwint/remaimber/releases)
-and put it on your `PATH`.
-
-The Claude Code and Codex plugins can also install it: their `SessionStart` hook
-downloads the latest release to `~/.local/bin` when `remaimber` is missing. Hooks
-and the MCP server fall back to that directory, so archiving works either way —
-but add `~/.local/bin` to your `PATH` to run `remaimber` yourself.
-
-### 2. Your agents
-
-Optional: `remaimber import` reads every agent's transcripts off disk on its own.
-Wiring an agent up adds what a periodic import cannot do — archiving *before* a
-compaction destroys the context, capturing a session's repo identity while its
-worktree still exists, and giving the agent the search tools.
-
-| agent | requires | install |
-|---|---|---|
-| Claude Code | — | `remaimber setup`, or the plugin |
-| Codex | 0.148.0+ | the plugin |
-| pi | 0.84+ | the package |
-
-**Claude Code** — either route works; the plugin adds slash commands.
+Install the plugin (or, for pi, the package). It carries the hooks and the search
+tools, and its `SessionStart` hook runs `scripts/ensure-installed.sh`, which
+downloads the CLI from the latest release to `~/.local/bin` when `remaimber` is
+missing. Nothing else to do.
 
 ```bash
-remaimber setup                                   # hooks + MCP server
-# or
+# Claude Code — adds /rmb:recall, /rmb:resume, /rmb:sessions
 claude plugin marketplace add erwint/remaimber
-claude plugin install rmb@remaimber                # + /rmb:recall, /rmb:resume, /rmb:sessions
-```
+claude plugin install rmb@remaimber
 
-`setup` writes hooks to `~/.claude/settings.json` and registers the MCP server
-with `claude mcp add --scope user`, the only place Claude Code reads user-scope
-servers from — one written into `settings.json` is never loaded. Restart Claude
-Code afterwards.
-
-**Codex** — needs 0.148.0 or newer, where asynchronous command hooks landed.
-Older versions log `skipping async hooks, not supported yet` and run only the
-synchronous ones: the archive is still written before a compaction, but
-background maintenance never fires.
-
-```bash
+# Codex 0.148.0+ — then run /hooks once inside Codex and trust them
 codex plugin marketplace add erwint/remaimber
 codex plugin add rmb@remaimber
-```
 
-Then run `/hooks` inside Codex once and trust them — Codex skips bundled hooks
-until you do.
-
-**pi** — no MCP, so the package ships the same skills written against the CLI,
-plus an extension hooking `session_start`, `agent_settled`, `session_compact` and
-`session_shutdown`.
-
-```bash
+# pi 0.84+
 pi install git:github.com/erwint/remaimber
 ```
 
-`remaimber setup` configures Claude Code only; Codex and pi own their plugin and
-package through their own tooling. Both `setup` and `remaimber doctor` end by
-listing every agent they find, whether it is wired up, and the commands that
-finish the job.
+### From the CLI
+
+Install `remaimber` yourself, then let it wire up every agent on the machine:
+
+```bash
+go install github.com/erwint/remaimber/cmd/remaimber@latest   # needs Go 1.26+
+                                                              # or grab a release binary
+remaimber setup              # every agent it finds
+remaimber setup --agent codex --dry-run   # one of them, or just look
+```
+
+`setup` writes Claude Code's configuration itself — hooks in
+`~/.claude/settings.json`, and the MCP server registered with
+`claude mcp add --scope user`, the only place Claude Code reads user-scope
+servers from. For Codex and pi it runs the install commands above, because their
+plugin and package are owned by their own tooling. Restart an agent after wiring
+it up.
+
+`remaimber doctor` reports the same picture at any time: which agents are
+installed, which are wired up, and what finishes the job.
+
+### Requirements
+
+| | |
+|---|---|
+| Claude Code | any version with plugin or hook support |
+| Codex | **0.148.0+** — asynchronous command hooks. Older versions log `skipping async hooks, not supported yet` and run only the synchronous ones, so the archive is still written before a compaction but background maintenance never fires |
+| pi | 0.84+ |
+| Go | 1.26+, to build from source |
+
+Nothing above is required to archive: `remaimber import` reads every agent's
+transcripts off disk on its own. Wiring an agent up adds what a periodic import
+cannot do — archiving *before* a compaction destroys the context, capturing a
+session's repo identity while its worktree still exists, and giving the agent the
+search tools.
+
+If you installed through a plugin, the CLI is in `~/.local/bin`. Hooks and the
+MCP server fall back to that directory, so archiving works regardless; add it to
+your `PATH` to run `remaimber` yourself.
 
 ## Usage
 

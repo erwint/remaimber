@@ -1881,25 +1881,48 @@ func verifyCmd() *cobra.Command {
 }
 
 func setupCmd() *cobra.Command {
-	return &cobra.Command{
+	var agent string
+	var dryRun bool
+	cmd := &cobra.Command{
 		Use: "setup",
-		Example: `  # Wire up Claude Code, and report what the other agents still need
-  remaimber setup`,
-		Short: "Configure Claude Code (hooks + MCP server), and report the other agents",
-		Long: "Configure Claude Code: import hooks in settings.json, and the MCP server\n" +
-			"registered where Claude Code reads it.\n\n" +
-			"Codex and pi are installed as a plugin and a package, owned by their own\n" +
-			"tooling, so setup does not write those itself — it reports whether they are\n" +
-			"wired up and prints the commands that finish the job.",
+		Example: `  # Wire up every agent found on this machine
+  remaimber setup
+
+  # Just one of them, or just look
+  remaimber setup --agent codex
+  remaimber setup --dry-run`,
+		Short: "Wire up every coding agent on this machine",
+		Long: "Wire up every agent found on this machine.\n\n" +
+			"Claude Code's configuration is written directly: import hooks in\n" +
+			"settings.json, and the MCP server registered where Claude Code reads it.\n" +
+			"Codex and pi own a plugin and a package, so setup runs their own install\n" +
+			"commands rather than writing their configuration behind their back.\n\n" +
+			"None of it is required to archive: each plugin carries the same hooks and\n" +
+			"fetches the CLI itself, so installing the plugin from inside an agent is a\n" +
+			"complete alternative to running this.",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := setup.Run(); err != nil {
-				return err
+			if agent != "" && agent != importer.AgentClaude &&
+				agent != importer.AgentCodex && agent != importer.AgentPi {
+				return fmt.Errorf("unknown agent %q: want claude, codex or pi", agent)
 			}
-			setup.RegisterMCP()
+			if agent == "" || agent == importer.AgentClaude {
+				if dryRun {
+					fmt.Println("claude: would write hooks to settings.json and register the MCP server")
+				} else {
+					if err := setup.Run(); err != nil {
+						return err
+					}
+					setup.RegisterMCP()
+				}
+			}
+			setup.SetupAgents(agent, dryRun)
 			setup.ReportAgents()
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&agent, "agent", "", "Only wire up this agent: claude, codex or pi")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print what would be done, without doing it")
+	return cmd
 }
 
 func mcpCmd() *cobra.Command {

@@ -35,10 +35,11 @@ changes: Codex caches an installed plugin by version. Both plugins have a
 validator worth running — `claude plugin validate .` and the plugin-creator
 skill's `validate_plugin.py` for Codex.
 
-`remaimber setup` writes Claude Code's config only. The other two install a
-plugin and a package through their own tooling, so setup reports their state
-instead of writing it (`internal/setup/agents.go`); `doctor` prints the same
-report.
+`remaimber setup` wires up every agent it finds (`internal/setup/agents.go`):
+Claude Code's config it writes itself, while Codex and pi get their own install
+commands run for them, since their plugin and package are owned by that tooling.
+`--agent` limits it, `--dry-run` prints without doing. `doctor` prints the same
+per-agent report.
 
 **Claude Code does not read `mcpServers` from `settings.json`.** User-scope MCP
 servers live in `~/.claude.json`, which `claude mcp add --scope user` owns — that

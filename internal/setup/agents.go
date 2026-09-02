@@ -11,22 +11,73 @@ import (
 	"github.com/erwint/remaimber/internal/homedir"
 )
 
-// `remaimber setup` configures Claude Code, because that is the only agent whose
-// integration is a pair of config files remaimber can safely write. Codex and pi
-// install a plugin and a package respectively — their own tooling owns those,
-// and duplicating what it does by hand would leave two half-installations to
-// reconcile.
+// `remaimber setup` wires up every agent on the machine, each through its own
+// tooling: Claude Code's config is written directly, while Codex and pi are
+// asked to install the plugin and the package they own. Writing their
+// configuration by hand instead would leave a half-installation their own
+// commands do not know about.
 //
-// Silence about them is the problem, though: an agent that is installed and
-// unarchived looks configured, because nothing ever said otherwise. So setup
-// ends by naming every agent it can find and what remains to be done for it.
+// Nothing here is required to archive: an agent's plugin carries the same hooks
+// and fetches the CLI itself, so a plugin install is a complete route on its own
+// and setup is the route for people who installed the CLI first.
 
 // AgentStatus is one agent's integration state, as setup can determine it.
 type AgentStatus struct {
 	Name      string
 	Installed bool
 	Wired     bool
-	Next      []string // commands that would finish the job
+	// Install is what wires this agent up, as argv. Empty for Claude Code,
+	// whose configuration remaimber writes itself.
+	Install [][]string
+	Note    string   // printed after a successful install
+	Next    []string // shown when reporting rather than installing
+}
+
+// SetupAgents wires up each detected agent that is not configured yet. only
+// restricts it to one agent; dryRun prints the commands without running them.
+func SetupAgents(only string, dryRun bool) {
+	home, err := homedir.Dir()
+	if err != nil {
+		return
+	}
+	for _, s := range []AgentStatus{codexStatus(home), piStatus(home)} {
+		if only != "" && only != s.Name {
+			continue
+		}
+		switch {
+		case !s.Installed:
+			continue
+		case s.Wired:
+			fmt.Printf("\n%s: already configured\n", s.Name)
+			continue
+		}
+		fmt.Printf("\n%s: installing the %s\n", s.Name, packagingOf(s.Name))
+		for _, argv := range s.Install {
+			fmt.Printf("  $ %s\n", strings.Join(argv, " "))
+			if dryRun {
+				continue
+			}
+			cmd := exec.Command(argv[0], argv[1:]...)
+			out, err := cmd.CombinedOutput()
+			if trimmed := strings.TrimSpace(string(out)); trimmed != "" {
+				fmt.Printf("    %s\n", strings.ReplaceAll(trimmed, "\n", "\n    "))
+			}
+			if err != nil {
+				fmt.Printf("    failed (%v) — run it yourself to see why\n", err)
+				break
+			}
+		}
+		if s.Note != "" && !dryRun {
+			fmt.Printf("  %s\n", s.Note)
+		}
+	}
+}
+
+func packagingOf(agent string) string {
+	if agent == "pi" {
+		return "package"
+	}
+	return "plugin"
 }
 
 // ReportAgents prints what is configured and what is not, for every agent
@@ -106,9 +157,13 @@ func codexStatus(home string) AgentStatus {
 		s.Wired = strings.Contains(cfg, `[plugins."rmb@`) ||
 			strings.Contains(cfg, "[mcp_servers.remaimber]")
 	}
+	s.Install = [][]string{
+		{"codex", "plugin", "marketplace", "add", "erwint/remaimber"},
+		{"codex", "plugin", "add", "rmb@remaimber"},
+	}
+	s.Note = "now run /hooks inside Codex once and trust them — bundled hooks are skipped until you do"
 	s.Next = []string{
-		"codex plugin marketplace add erwint/remaimber",
-		"codex plugin add rmb@remaimber",
+		"remaimber setup --agent codex",
 		"then run /hooks inside Codex once, to trust the bundled hooks",
 	}
 	return s
@@ -120,7 +175,8 @@ func piStatus(home string) AgentStatus {
 	if data, err := os.ReadFile(filepath.Join(dir, "settings.json")); err == nil {
 		s.Wired = strings.Contains(string(data), "remaimber")
 	}
-	s.Next = []string{"pi install git:github.com/erwint/remaimber"}
+	s.Install = [][]string{{"pi", "install", "git:github.com/erwint/remaimber"}}
+	s.Next = []string{"remaimber setup --agent pi"}
 	return s
 }
 
