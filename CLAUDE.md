@@ -61,6 +61,12 @@ yet`. Dropping `"async": true` for shell backgrounding (`... &`, as the Claude
 Code hooks do) would remove the floor, at the cost of Codex no longer accounting
 for the work it started.
 
+`remaimber update` replaces the binary with the newest release, and the import
+sweep checks once a day (`internal/selfupdate`). The check rides on
+`import-if-stale` rather than its own hook: adding a command to `hooks.json`
+changes every hook's hash, and Codex makes the user re-trust them when that
+happens.
+
 ## Release
 
 ```bash

@@ -73,6 +73,14 @@ cannot do — archiving *before* a compaction destroys the context, capturing a
 session's repo identity while its worktree still exists, and giving the agent the
 search tools.
 
+### Staying current
+
+`remaimber update` replaces the binary with the newest release. The background
+sweep also checks once a day and updates in place, because neither install route
+does it otherwise: a plugin updates itself through its marketplace, while its
+install hook only runs when the CLI is *missing*. A binary built from source is
+left alone — it has no release version to compare against.
+
 ### Where the CLI ends up
 
 On the plugin route, the first session downloads `remaimber` into a directory
@@ -140,6 +148,10 @@ remaimber summarize <session-id> --force      # rebuild one session's summary
 # What is wired up, what is stuck, what failed quietly
 remaimber doctor
 remaimber stats
+
+# Update to the latest release (also checked once a day in the background)
+remaimber update
+remaimber update --check
 
 # Maintenance
 remaimber verify

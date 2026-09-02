@@ -21,6 +21,7 @@ import (
 	"github.com/erwint/remaimber/internal/importer"
 	"github.com/erwint/remaimber/internal/mover"
 	"github.com/erwint/remaimber/internal/segmenter"
+	"github.com/erwint/remaimber/internal/selfupdate"
 	"github.com/erwint/remaimber/internal/setup"
 	"github.com/erwint/remaimber/internal/summarizer"
 	"github.com/erwint/remaimber/internal/types"
@@ -97,6 +98,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(verifyCmd())
 	root.AddCommand(setupCmd())
 	root.AddCommand(mcpCmd())
+	root.AddCommand(updateCmd())
 	root.AddCommand(completionCmd())
 
 	return root
@@ -176,6 +178,11 @@ func importIfStaleCmd() *cobra.Command {
 		Short:  "Import only if last import was >5 minutes ago (for hooks)",
 		Hidden: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Piggybacked on the import sweep rather than given its own hook:
+			// adding a command to hooks.json would change every hook's hash, and
+			// Codex makes the user re-trust them when that happens.
+			updateIfStale(cmd.Context())
+
 			if !importer.ShouldImport() {
 				return nil
 			}
@@ -1922,6 +1929,74 @@ func setupCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&force, "force", false, "With --no-plugin, write the hooks even when the plugin already provides them")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print what would be done, without doing it")
 	return cmd
+}
+
+// updateCmd replaces the binary with the newest release. Installing through a
+// plugin never updates the CLI — the install hook only fires when it is missing
+// — so without this a machine keeps whatever version first landed.
+func updateCmd() *cobra.Command {
+	var checkOnly bool
+	cmd := &cobra.Command{
+		Use:   "update",
+		Short: "Update remaimber to the latest release",
+		Example: `  # Update in place
+  remaimber update
+
+  # Only report whether a newer release exists
+  remaimber update --check`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			latest, err := selfupdate.Latest(cmd.Context())
+			if err != nil {
+				return err
+			}
+			if !selfupdate.Newer(version, latest) {
+				if version == "dev" || version == "" {
+					// A build from source has no version to compare against, and
+					// replacing it with a release would undo somebody's work.
+					fmt.Printf("remaimber was built from source, so there is nothing to compare; latest release is %s\n", latest)
+					return nil
+				}
+				fmt.Printf("remaimber %s is current (latest release %s)\n", version, latest)
+				return nil
+			}
+			if checkOnly {
+				fmt.Printf("remaimber %s is behind %s — run: remaimber update\n", version, latest)
+				return nil
+			}
+			path, err := selfupdate.Apply(cmd.Context(), latest)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("updated %s to %s\n", path, latest)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&checkOnly, "check", false, "Report whether a newer release exists, without installing it")
+	return cmd
+}
+
+// updateIfStale checks for a release at most once a day and installs it. Fails
+// soft in every direction: this runs from a hook, where a broken network or a
+// read-only install directory must not disturb the session.
+func updateIfStale(ctx context.Context) {
+	if !importer.ShouldCheckUpdate() {
+		return
+	}
+	lock := importer.AcquireUpdateLock()
+	if lock == nil {
+		return
+	}
+	defer importer.TouchAndRelease(lock)
+
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	latest, err := selfupdate.Latest(ctx)
+	if err != nil || !selfupdate.Newer(version, latest) {
+		return
+	}
+	if path, err := selfupdate.Apply(ctx, latest); err == nil {
+		fmt.Fprintf(os.Stderr, "remaimber: updated %s to %s\n", path, latest)
+	}
 }
 
 func mcpCmd() *cobra.Command {

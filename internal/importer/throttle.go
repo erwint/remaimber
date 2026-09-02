@@ -15,6 +15,11 @@ import (
 // ThrottledImportInterval is the minimum time between background imports.
 const ThrottledImportInterval = 5 * time.Minute
 
+// UpdateCheckInterval is the minimum time between release checks. Daily: a
+// missed release costs a day, while asking GitHub on every session start would
+// be a request per session for something that changes weekly at most.
+const UpdateCheckInterval = 24 * time.Hour
+
 // ThrottledSummarizeInterval is the minimum time between background summary
 // sweeps. Larger than imports because summarization is heavier (an LLM call).
 const ThrottledSummarizeInterval = 15 * time.Minute
@@ -71,6 +76,16 @@ func ShouldImport() bool {
 // AcquireImportLock takes the import throttle lock.
 func AcquireImportLock() *os.File {
 	return AcquireLock(".last-import")
+}
+
+// ShouldCheckUpdate reports whether a release check is due.
+func ShouldCheckUpdate() bool {
+	return ShouldRun(".last-update-check", UpdateCheckInterval)
+}
+
+// AcquireUpdateLock takes the update-check throttle lock.
+func AcquireUpdateLock() *os.File {
+	return AcquireLock(".last-update-check")
 }
 
 // ShouldSummarize reports whether a throttled background summary sweep is due.
