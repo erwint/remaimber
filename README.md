@@ -75,17 +75,30 @@ search tools.
 
 ### Where the CLI ends up
 
-On the plugin route, the first session downloads `remaimber` into a per-user bin
-directory: `~/.local/bin` or `~/bin`, preferring one your `PATH` already has, so
-that you can run it yourself without doing anything.
+On the plugin route, the first session downloads `remaimber` into a directory
+your `PATH` already has — `~/.local/bin`, `~/bin`, or a writable
+`/usr/local/bin` — so it is runnable straight away.
 
-If neither is on your `PATH` it installs to `~/.local/bin` and says so. Archiving
-still works — the hooks and the MCP server look there directly — but to run
-`remaimber` from a shell, add it:
+If none of those is on your `PATH`, it installs to `~/.local/bin` and appends one
+marked line to your shell profile (`~/.zshrc` or `~/.bash_profile`), so a new
+shell finds it. The line is added once and never duplicated. To keep your profile
+untouched, set `REMAIMBER_NO_PATH_EDIT=1` — archiving works regardless, since the
+hooks and the MCP server look in `~/.local/bin` directly.
 
-```bash
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc   # or ~/.bashrc
-```
+## Using it from an agent
+
+The three skills — **recall**, **resume**, **sessions** — are reached differently
+in each agent, because each has its own convention:
+
+| agent | how to invoke |
+|---|---|
+| Claude Code | `/rmb:recall`, `/rmb:resume`, `/rmb:sessions` |
+| Codex | `/skills`, then pick one — Codex has no plugin slash commands |
+| pi | `/skill:recall`, `/skill:resume`, `/skill:sessions` |
+
+In all three you can also just ask — "find the conversation where we set up the
+mail relay", "what did I work on last week?" — since each skill's description is
+in the model's context and it loads the right one.
 
 ## Usage
 

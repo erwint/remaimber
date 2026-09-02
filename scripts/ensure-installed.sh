@@ -4,15 +4,20 @@ set -euo pipefail
 
 REPO="erwint/remaimber"
 
-# Install into a directory the user's PATH already has, so `remaimber` works in
-# their shell with no further setup. Only conventional per-user bin directories
-# are considered — scattering a binary into whatever happens to be writable would
-# be worse than the fallback. That fallback is ~/.local/bin, which the hooks and
-# the MCP server look in regardless of PATH.
+# Prefer a directory the PATH already has, so `remaimber` is runnable with no
+# further setup. Only places a binary conventionally belongs are considered: a
+# tool that scatters itself into whatever happens to be writable — another
+# tool's ~/.cargo/bin, say — is worse than one that asks for a PATH entry.
 INSTALL_DIR=""
-for candidate in "${HOME}/.local/bin" "${HOME}/bin"; do
+for candidate in "${HOME}/.local/bin" "${HOME}/bin" "/usr/local/bin"; do
   case ":${PATH}:" in
-    *":${candidate}:"*) INSTALL_DIR="$candidate"; break ;;
+    *":${candidate}:"*)
+      # /usr/local/bin is on many PATHs but often root-owned; only take it when
+      # it can be written without sudo.
+      if [ -d "$candidate" ] && [ ! -w "$candidate" ]; then continue; fi
+      INSTALL_DIR="$candidate"
+      break
+      ;;
   esac
 done
 INSTALL_DIR="${INSTALL_DIR:-${HOME}/.local/bin}"
@@ -47,13 +52,44 @@ chmod +x "${INSTALL_DIR}/remaimber"
 # pi as well, which is not a Claude Code hook's business.
 
 echo "remaimber ${LATEST} installed to ${INSTALL_DIR}/remaimber"
+
+# Nothing on the PATH was usable, so the binary landed somewhere the shell will
+# not find. Archiving still works — the hooks and the MCP server look here
+# directly — but every documented command would fail for the person typing it,
+# so add the directory to their shell profile. One marked line, appended once,
+# and skippable with REMAIMBER_NO_PATH_EDIT=1.
 case ":${PATH}:" in
-  *":${INSTALL_DIR}:"*) ;;
-  *)
-    echo "remaimber: installed to ${INSTALL_DIR}, which is not on your PATH." >&2
-    echo "remaimber: archiving works anyway — the hooks and the MCP server look there directly." >&2
-    echo "remaimber: to run it yourself, add to ~/.zshrc (or ~/.bashrc):" >&2
-    echo "           export PATH=\"${INSTALL_DIR}:\$PATH\"" >&2
-    ;;
+  *":${INSTALL_DIR}:"*) exit 0 ;;
 esac
 
+if [ -n "${REMAIMBER_NO_PATH_EDIT:-}" ]; then
+  echo "remaimber: ${INSTALL_DIR} is not on your PATH; add it yourself:" >&2
+  echo "           export PATH=\"${INSTALL_DIR}:\$PATH\"" >&2
+  exit 0
+fi
+
+shell="${SHELL:-}"
+if [ -z "$shell" ] && [ "$(uname -s)" = "Darwin" ]; then
+  shell="$(dscl . -read "/Users/$(id -un)" UserShell 2>/dev/null | awk '{print $2}')"
+fi
+case "$shell" in
+  */zsh)  profile="${ZDOTDIR:-$HOME}/.zshrc" ;;
+  */bash) if [ "$(uname -s)" = "Darwin" ]; then profile="${HOME}/.bash_profile"; else profile="${HOME}/.bashrc"; fi ;;
+  *)      profile="" ;;
+esac
+
+if [ -z "$profile" ]; then
+  echo "remaimber: ${INSTALL_DIR} is not on your PATH, and your shell is not one this" >&2
+  echo "           script edits. Add the equivalent of:" >&2
+  echo "           export PATH=\"${INSTALL_DIR}:\$PATH\"" >&2
+  exit 0
+fi
+
+if [ -f "$profile" ] && grep -q "added by remaimber" "$profile"; then
+  exit 0 # already there; a second line would just accumulate
+fi
+
+{
+  printf '\n# added by remaimber\nexport PATH="%s:$PATH"\n' "$INSTALL_DIR"
+} >> "$profile"
+echo "remaimber: added ${INSTALL_DIR} to your PATH in ${profile} — open a new shell to use it"
