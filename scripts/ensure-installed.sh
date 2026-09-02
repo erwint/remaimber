@@ -33,3 +33,12 @@ chmod +x "${INSTALL_DIR}/remaimber"
 remaimber setup >/dev/null 2>&1 || true
 
 echo "remaimber ${LATEST} installed to ${INSTALL_DIR}/remaimber"
+case ":${PATH}:" in
+  *":${INSTALL_DIR}:"*) ;;
+  *)
+    echo "remaimber: ${INSTALL_DIR} is not on PATH." >&2
+    echo "remaimber: the hooks and the MCP server fall back to it, but add this to your shell profile so you can run it too:" >&2
+    echo "           export PATH=\"${INSTALL_DIR}:\$PATH\"" >&2
+    ;;
+esac
+

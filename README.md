@@ -1,97 +1,85 @@
 # remaimber
 
-Archive, search, and manage coding-agent conversations — Claude Code, Codex and pi in one archive. A Go CLI + MCP server that stores all conversation data in SQLite with FTS5 full-text search.
+Archive, search, and resume coding-agent conversations — Claude Code, Codex and
+pi in one archive. A Go CLI and MCP server that keeps every conversation in
+SQLite with FTS5 full-text search.
 
-Every agent's sessions land in the same database, keyed to the same projects, so a conversation you had in one is findable and resumable from another.
+Agents delete their own transcripts: they prune on a retention schedule and
+discard the rest on compaction. remaimber copies them into a database that
+outlives them, keyed so that a conversation from one agent is findable and
+resumable from another.
 
 ## Install
 
-### From source (requires Go 1.26+)
+Two steps: the CLI, then whichever agents you use. The CLI does the work; the
+agent integrations call it at the right moments.
+
+### 1. The CLI
 
 ```bash
-go install github.com/erwint/remaimber/cmd/remaimber@latest
+go install github.com/erwint/remaimber/cmd/remaimber@latest   # needs Go 1.26+
 ```
 
-### From releases
+Or download a binary from [Releases](https://github.com/erwint/remaimber/releases)
+and put it on your `PATH`.
 
-Download the latest binary from [GitHub Releases](https://github.com/erwint/remaimber/releases).
+The Claude Code and Codex plugins can also install it: their `SessionStart` hook
+downloads the latest release to `~/.local/bin` when `remaimber` is missing. Hooks
+and the MCP server fall back to that directory, so archiving works either way —
+but add `~/.local/bin` to your `PATH` to run `remaimber` yourself.
 
-### Requirements
+### 2. Your agents
 
-| | version |
-|---|---|
-| Codex | **0.148.0 or newer** — asynchronous command hooks; below that the plugin's maintenance hooks are skipped |
-| Claude Code | any version with plugin or hook support |
-| pi | any version with extension support (0.84+) |
-| Go | 1.26+, to build from source (`go.mod` declares 1.26.2) |
-
-### Setup
-
-`remaimber import` works on its own — it reads every agent's transcripts off disk.
-Wiring it into an agent adds the parts a scheduled import can't do: archiving
-*before* `/compact` destroys data, capturing a session's repo identity while its
+Optional: `remaimber import` reads every agent's transcripts off disk on its own.
+Wiring an agent up adds what a periodic import cannot do — archiving *before* a
+compaction destroys the context, capturing a session's repo identity while its
 worktree still exists, and giving the agent the search tools.
 
-`remaimber setup` configures **Claude Code only**. Codex and pi install a plugin
-and a package, owned by their own tooling, so setup does not write those — it
-ends by naming every agent it finds and printing what each still needs.
-`remaimber doctor` reports the same, so a half-wired machine is visible without
-running setup again.
+| agent | requires | install |
+|---|---|---|
+| Claude Code | — | `remaimber setup`, or the plugin |
+| Codex | 0.148.0+ | the plugin |
+| pi | 0.84+ | the package |
 
-#### Claude Code
-
-```bash
-remaimber setup
-```
-
-This writes the hooks (`SessionStart`, `PreCompact`, `Notification`, `SessionEnd`)
-to `~/.claude/settings.json`, and registers the MCP server with
-`claude mcp add --scope user` — Claude Code reads user-scope MCP servers from
-`~/.claude.json`, never from `settings.json`, so a server written into the latter
-is silently inert. Restart Claude Code afterwards to pick the tools up.
-
-Or install it as a plugin instead — same hooks and MCP server, plus the
-`/rmb:recall`, `/rmb:resume` and `/rmb:sessions` commands:
+**Claude Code** — either route works; the plugin adds slash commands.
 
 ```bash
+remaimber setup                                   # hooks + MCP server
+# or
 claude plugin marketplace add erwint/remaimber
-claude plugin install rmb@remaimber
+claude plugin install rmb@remaimber                # + /rmb:recall, /rmb:resume, /rmb:sessions
 ```
 
-The plugin bundles the MCP server from v1.2.0. An older installed copy provides
-the commands but no search tools — `claude plugin update rmb@remaimber` fixes
-that, and `remaimber doctor` says so when it applies.
+`setup` writes hooks to `~/.claude/settings.json` and registers the MCP server
+with `claude mcp add --scope user`, the only place Claude Code reads user-scope
+servers from — one written into `settings.json` is never loaded. Restart Claude
+Code afterwards.
 
-#### Codex
-
-> **Requires Codex 0.148.0 or newer.** Verified on 0.151.0.
-
-Asynchronous command hooks arrived in 0.148.0. On 0.147 and older, Codex logs
-`skipping async hooks, not supported yet` and runs the rest: the archive is still
-written before a compaction, but the background maintenance sweeps and the
-auto-install never fire — a failure that looks like nothing happening at all.
+**Codex** — needs 0.148.0 or newer, where asynchronous command hooks landed.
+Older versions log `skipping async hooks, not supported yet` and run only the
+synchronous ones: the archive is still written before a compaction, but
+background maintenance never fires.
 
 ```bash
 codex plugin marketplace add erwint/remaimber
 codex plugin add rmb@remaimber
 ```
 
-The plugin (`plugins/rmb/`) bundles the lifecycle hooks, the MCP server, and the
-`recall` / `resume` / `sessions` skills. Codex does not trust bundled hooks on
-install: run `/hooks` once and trust them, or they are silently skipped. If
-`remaimber` isn't on PATH yet, the `SessionStart` hook downloads it from the
-latest release.
+Then run `/hooks` inside Codex once and trust them — Codex skips bundled hooks
+until you do.
 
-#### pi
+**pi** — no MCP, so the package ships the same skills written against the CLI,
+plus an extension hooking `session_start`, `agent_settled`, `session_compact` and
+`session_shutdown`.
 
 ```bash
 pi install git:github.com/erwint/remaimber
 ```
 
-pi has no MCP, so the package ships the same skills written against the CLI, plus
-an extension (`pi/extensions/remaimber.ts`) that hooks `session_start`,
-`agent_settled`, `session_compact` and `session_shutdown`. Install `remaimber`
-itself first — the extension calls it and stays quiet when it's absent.
+`remaimber setup` configures Claude Code only; Codex and pi own their plugin and
+package through their own tooling. Both `setup` and `remaimber doctor` end by
+listing every agent they find, whether it is wired up, and the commands that
+finish the job.
 
 ## Usage
 
@@ -102,148 +90,169 @@ remaimber import
 # Search conversations (every agent by default)
 remaimber search "sqlite configuration"
 remaimber search "auth" --role user --since 2026-01-01
-remaimber search "recipe import" --repo .   # only this repo, across all worktrees
-remaimber search "apply_patch" --agent codex  # only one agent's conversations
+remaimber search "recipe import" --repo .     # this repo, across all worktrees
+remaimber search "apply_patch" --agent codex  # one agent's conversations
+
+# Recall by what the work turned out to be, not what was typed
+remaimber recall 'smtp relay on the nas'
 
 # List sessions
 remaimber list
 remaimber list --project myproject --json
-remaimber list --repo . --subpath .         # this repo + current monorepo subpath
+remaimber list --repo . --subpath .           # this repo + current monorepo subpath
 
-# Show a session (supports short ID prefixes)
+# Show or export a session (short ID prefixes work)
 remaimber show abc123
-
-# Export a session
 remaimber export --last 1 --format markdown
 remaimber export <session-id> --format json
 
-# Find & resume a session in the CURRENT worktree (cross-worktree)
-remaimber resume                            # list this repo's sessions, any worktree
-remaimber resume <session-id>               # link it here + print resume options
+# Find & resume a session in the CURRENT worktree, from any agent
+remaimber resume                                # this repo's sessions, any worktree
+remaimber resume <session-id>                   # print how to open it
+remaimber resume --match 'the mail relay work'  # find the passage, not the session
 
-# Move/copy conversation to another project
+# Move/copy a conversation to another project
 remaimber move <session-id> <target-project> --copy
 
 # Rolling summaries (LLM-backed; see Configuration)
-remaimber summarize                         # summarize sessions with new activity
-remaimber summarize <session-id> --force    # rebuild one session's summary
+remaimber summarize                           # sessions with new activity
+remaimber summarize <session-id> --force      # rebuild one session's summary
 
 # What is wired up, what is stuck, what failed quietly
 remaimber doctor
-
-# Database management
 remaimber stats
+
+# Maintenance
 remaimber verify
 remaimber delete <session-id>
-remaimber backfill-identity                 # one-time: populate repo identity for old sessions
+remaimber backfill-identity                   # repo identity for pre-existing sessions
 
 # Shell completions
 remaimber completion zsh > "${fpath[1]}/_remaimber"
 ```
 
-## MCP Tools
+## MCP tools
 
-When running as an MCP server (`remaimber mcp`), these tools are available. Hosts
-namespace them by server, so an agent sees `mcp__remaimber__find_context` and so
-on; `remaimber setup` or either plugin registers the server, and
-`remaimber doctor` says whether it is reachable.
+`remaimber mcp` speaks MCP over stdio. Hosts namespace the tools by server, so an
+agent calls them as `mcp__remaimber__find_context` and so on.
 
-| Tool | Description |
-|------|-------------|
-| `find_context` | Given a topic in plain words, find the stretch of *any* conversation actually about it — ranked passages with summaries, messages only on request |
-| `get_segments` | Locate the passage inside one known session, or list its segments to choose by summary |
-| `get_summary` | A session's rolling summary plus its per-segment summaries, without reading the messages |
-| `search_conversations` | FTS5 search with project/repo/role/date filters |
-| `get_session` | Retrieve messages from a specific session |
-| `list_sessions` | List sessions with optional filters (incl. `repo`/`subpath`) |
+| tool | what it is for |
+|------|----------------|
+| `find_context` | A topic in plain words → the stretch of *any* conversation actually about it, ranked, with summaries; messages only on request |
+| `get_segments` | The passage inside one known session, or its segment list to choose from |
+| `get_summary` | A session's rolling summary and per-segment summaries, without the messages |
+| `search_conversations` | FTS5 search over message text |
+| `get_session` | The messages of one session |
+| `list_sessions` | Sessions, with filters |
 | `move_conversation` | Move or copy a conversation between projects |
 | `link_session` | Link a session into the current project so it can be resumed here |
 
-`search_conversations` and `list_sessions` accept `repo: "."` and `subpath: "."` to mean "the current repo / subpath", resolved from the server's working directory.
+`search_conversations` and `list_sessions` take `repo: "."` and `subpath: "."`,
+meaning the current repo or subpath, resolved from the server's working
+directory.
 
-`find_context`, `search_conversations` and `list_sessions` also take `agent`. It defaults to the conversations of whichever agent is calling — identified from the MCP client name — because an agent asking through MCP is nearly always looking for its own earlier work. Pass `agent: "all"` to search every agent, or name one (`claude`, `codex`, `pi`).
+`find_context`, `search_conversations` and `list_sessions` also take `agent`,
+which defaults to the conversations of whichever agent is calling — identified
+from the MCP client name, since an agent asking through MCP is nearly always
+looking for its own earlier work. Pass `agent: "all"` for every agent, or name
+one. The CLI defaults the other way: it searches everything, and `--agent`
+narrows it.
 
 ## Agents
 
-| | transcripts | resumed with | integration |
-|---|---|---|---|
-| Claude Code | `~/.claude/projects/<key>/<id>.jsonl` | `claude --resume <id>` (after relinking) | `remaimber setup`, or the plugin at the repo root |
-| Codex | `~/.codex/sessions/<y>/<m>/<d>/rollout-*-<id>.jsonl` | `codex resume <id>` | the plugin in `plugins/rmb/` (Codex ≥ 0.148.0) |
-| pi | `~/.pi/agent/sessions/<key>/<ts>_<id>.jsonl` | `pi --session <path>` | the pi package (repo root `package.json`) |
+| | transcripts | resumed with |
+|---|---|---|
+| Claude Code | `~/.claude/projects/<key>/<id>.jsonl` | `claude --resume <id>`, after relinking |
+| Codex | `~/.codex/sessions/<y>/<m>/<d>/rollout-*-<id>.jsonl` | `codex resume <id>` |
+| pi | `~/.pi/agent/sessions/<key>/<ts>_<id>.jsonl` | `pi --session <path>` |
 
-An import is retroactive: the first sweep after adding an agent picks up its
-whole history, not just new sessions. Two derived layers lag behind it. Summaries
-catch up on their own — the throttled sweep takes the entire backlog, newest
-first — or force them now with `remaimber summarize --all`. Durable repo identity
-is *not* retroactive: run `remaimber backfill-identity` once so `--repo .` finds
-the older sessions (those whose cwd no longer exists stay unattributed).
+Every agent shares one archive at `~/.remaimber/remaimber.db`. Each session
+records which agent produced it, and `remaimber resume <id>` prints the right
+command for that agent.
 
-Every agent shares one archive at `~/.remaimber/remaimber.db`. An archive still
-sitting at the old `~/.claude/remaimber/` is moved there on first use, with a
-symlink left behind so a session already running against the old path keeps
-reaching the same database without a restart.
+Sessions are grouped by project. Claude Code and pi encode the directory in their
+storage path; Codex files rollouts by date instead, so its project comes from the
+cwd recorded in each rollout's own header — which puts it in the same bucket as
+the other agents' sessions for that directory.
 
-Sessions carry the agent they came from, and `remaimber resume <id>` prints the
-right command for it. Searches span every agent by default; `--agent claude`,
-`--agent codex` or `--agent pi` narrows `search`, `recall` and `list` to one.
-The MCP tools invert that default: `search_conversations`, `find_context` and
-`list_sessions` scope to the calling agent's own conversations, since an agent
-asking through MCP is nearly always looking for its own earlier work — pass
-`agent: "all"` to search every agent, or name one. Codex files rollouts by date rather than by project, so its
-project key comes from the cwd recorded in each rollout's own header — which puts
-it in the same project bucket as the Claude Code and pi sessions for that
-directory. `remaimber doctor` reports, per agent, whether an installed one has
-never been archived.
+Adding an agent is retroactive: the next import picks up its whole history, not
+only new sessions. Summaries follow on their own, or immediately with
+`remaimber summarize --all`. Repo identity does not — run
+`remaimber backfill-identity` once so `--repo .` finds older sessions.
 
 ## Cross-worktree find & resume
 
-Claude Code keys session storage by launch directory, so the same repo scatters across many project keys (one per worktree) and native `--resume` can't find sessions from other worktrees — or from Agent worktrees that were later deleted.
+Claude Code keys session storage by launch directory, so one repo scatters across
+many project keys — one per worktree — and native `--resume` cannot see sessions
+from another worktree, or from a temporary worktree that has since been deleted.
 
-remaimber captures a **durable identity** for every session at start (a `SessionStart` hook records `repo_id` = `realpath(git --git-common-dir)` and `subpath` = `git rev-parse --show-prefix`). Because it's captured at start, it survives deletion of the worktree. You can then:
+remaimber captures a **durable identity** for every session at start: a
+`SessionStart` hook records `repo_id` (`realpath(git --git-common-dir)`, identical
+across every worktree of a repo) and `subpath` (`git rev-parse --show-prefix`).
+Captured at the start, it survives the worktree. So:
 
-- `remaimber list --repo .` — every session for this repo, across all worktrees
-- `remaimber resume <id>` — copy the session's transcript under the current directory's project key so `claude --resume <id>` works *here*, no worktree switching
+- `remaimber list --repo .` — every session for this repo, whatever worktree it ran in
+- `remaimber resume <id>` — link that transcript under the current directory's project key, so `claude --resume <id>` works *here*
 
-If a chosen session looks like it's still running in another worktree, resume warns you (resuming a live transcript would corrupt it). Run `remaimber backfill-identity` once after upgrading to populate identity for sessions whose worktree still exists.
+Resume warns when the chosen session looks like it is still running elsewhere;
+resuming a live transcript corrupts it. Liveness is judged by the transcript's
+modification time rather than a clean `SessionEnd`, so a killed session ages out
+by itself.
 
 ## Configuration
 
 | Env var | Default | Purpose |
 |---------|---------|---------|
 | `REMAIMBER_DB` | `~/.remaimber/remaimber.db` | Database path. One archive for every agent |
-| `REMAIMBER_LLM` | `claude` | Summary backend: `claude` (uses the local CLI) or an OpenAI-compatible base URL (e.g. `http://localhost:11434/v1` for Ollama, `http://localhost:1234/v1` for LM Studio) |
-| `REMAIMBER_LLM_MODEL` | `haiku` (claude backend) | Model name for summarization |
-| `REMAIMBER_LLM_KEY` | — | Optional bearer token for the HTTP backend |
+| `REMAIMBER_LLM` | `claude` | Summary backend: `claude` (the local CLI) or an OpenAI-compatible base URL (`http://localhost:11434/v1` for Ollama, `http://localhost:1234/v1` for LM Studio) |
+| `REMAIMBER_LLM_MODEL` | `haiku` (claude backend) | Model used for summarization |
+| `REMAIMBER_LLM_KEY` | — | Bearer token for the HTTP backend |
 
-### Summaries and hooks
+### Summaries
 
-Summaries are produced by a **throttled background sweep** (`summarize-if-stale`) wired into several hooks — `SessionStart`, `Notification`, and `SessionEnd`. It deliberately does **not** rely on `SessionEnd` alone, because that event isn't guaranteed to fire (e.g. a corporate VM killed overnight never cleanly ends its sessions). Running on `SessionStart` and `Notification` means a session left unsummarized by an unclean shutdown gets caught up the next time Claude runs. The sweep throttles itself (default 15 min) so firing it often is cheap.
+A long conversation is summarized in **segments**, so it can be recalled — or
+resumed in part — without reading all of it. Summaries come from a throttled
+background sweep wired into recurring hooks (`SessionStart`, `Notification`,
+`SessionEnd` and their equivalents), deliberately not `SessionEnd` alone: that
+event is not guaranteed to fire, and a machine killed overnight would leave its
+sessions unsummarized forever. The sweep throttles itself (15 minutes by
+default), so firing it often costs nothing.
 
-The rolling summary is **offset-based and incremental**, so the sweep also checkpoints *active* sessions (not just finished ones) — each pass folds only the messages added since the last summary. That way, if the machine is killed mid-session, the latest checkpoint (at most one throttle interval old) survives on disk and the session is still recallable by its summary, not just by full-text search. (This assumes `~/.claude` is persisted across restarts, which it normally is — that's where both the archive DB and Claude's transcripts live.)
+The rolling summary is offset-based and incremental, so the sweep also
+checkpoints *active* sessions — each pass folds in only what was added since the
+last one. A session interrupted by a crash is still recallable from a summary at
+most one interval old.
 
-Both backends run from hooks, including inside a live Claude session:
+Both backends run from hooks, including inside a live session:
 
-- **Local/HTTP backend** (Ollama, LM Studio, …): a plain HTTP call, no constraints.
-- **`claude` backend**: invoked as `claude -p --no-session-persistence --model haiku`. `--no-session-persistence` means the summarization call creates no session of its own, so it runs fine nested inside a Claude session and fires no lifecycle hooks (no recursion). It needs the `claude` binary and auth available in the hook's environment; where that isn't the case (headless/corporate), use the local/HTTP backend.
+- **HTTP backend** (Ollama, LM Studio, …): a plain HTTP call, no constraints.
+- **`claude` backend**: `claude -p --no-session-persistence --model haiku`.
+  `--no-session-persistence` means the call creates no session of its own, so it
+  nests inside a Claude session without firing lifecycle hooks or recursing. It
+  needs the `claude` binary and its auth in the hook's environment; where that is
+  not available (headless, corporate), use the HTTP backend.
 
-When a summary call fails, the reason is written to the session row and reported
-by `remaimber doctor`, not just printed. The sweep runs from hooks that send
-stderr to `/dev/null`, so an unrecorded failure would leave the backlog silently
-stuck — indistinguishable from having nothing left to summarize. The record is
-cleared as soon as that session summarizes successfully.
+A failed summary is recorded on the session and reported by `remaimber doctor`.
+The sweep runs from hooks that discard stderr, so a failure that was only printed
+would leave the backlog stuck with no visible reason. The record clears on the
+next success.
 
-Summarization treats the conversation transcript as **untrusted data** — the system prompt instructs the model never to follow instructions found inside it and to reply with only the summary, guarding against prompt injection from archived content.
-
-Liveness does not depend on a clean `SessionEnd`: a session is considered "still running" only if its transcript file was modified in the last few minutes, so a killed session correctly ages out on its own.
+Summarization treats the transcript as **untrusted data**: the system prompt
+tells the model never to follow instructions found inside it and to reply with
+the summary alone, so archived content cannot inject its way into a summary.
 
 ## How it works
 
-Coding agents store conversations as JSONL files — `~/.claude/projects/` for Claude Code, `~/.codex/sessions/` for Codex, `~/.pi/agent/sessions/` for pi. Those files get pruned on a retention schedule and are destroyed by compaction.
+Agents store conversations as JSONL — `~/.claude/projects/` for Claude Code,
+`~/.codex/sessions/` for Codex, `~/.pi/agent/sessions/` for pi. Each format is
+parsed by its own scanner into one shared shape, so search, summarization and
+resume behave the same whichever agent a conversation came from.
 
-remaimber archives everything into `~/.remaimber/remaimber.db` with:
-- **Full conversation memory** — stores all JSONL line types, not filtered
-- **FTS5 search** — porter stemming, date/role/project filtering
-- **UUID + content-hash dedup** — safe concurrent imports, no duplicates
-- **One importer at a time** — hooks fire from every agent at once, so importers take a lock and wait briefly for each other rather than contending inside SQLite; one that cannot get in skips, since the running import scans the same files
-- **Byte-offset tracking** — incremental imports skip already-processed content
-- **Content cleaning** — strips system-injected XML tags from search index
+The archive at `~/.remaimber/remaimber.db` keeps:
+
+- **Every JSONL line type**, not a filtered subset
+- **FTS5 search** with porter stemming and date/role/project/agent filters
+- **UUID and content-hash dedup**, so a re-import cannot duplicate anything
+- **Byte-offset tracking**, so an import reads only what is new
+- **One importer at a time** — hooks fire from several agents at once, so importers take a lock and wait briefly instead of contending inside SQLite; one that cannot get in skips, because the running import covers the same files
+- **Cleaned text** — each agent's injected scaffolding is stripped from the search index, so a search matches conversation rather than boilerplate

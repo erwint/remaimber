@@ -11,6 +11,39 @@ import (
 	"github.com/erwint/remaimber/internal/homedir"
 )
 
+// isOurs recognises a hook remaimber wrote, so setup replaces it rather than
+// adding a second copy. The binary's name is not a reliable marker — it is
+// written by absolute path, and that path is whatever the binary was installed
+// as — so the subcommands count too. They are ours: no other tool runs
+// "import-if-stale".
+func isOurs(cmd, bin string) bool {
+	if strings.Contains(cmd, "remaimber") || (bin != "" && strings.Contains(cmd, bin)) {
+		return true
+	}
+	for _, marker := range []string{
+		"record-identity", "import-if-stale", "summarize-if-stale", "mark-ended",
+	} {
+		if strings.Contains(cmd, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// binPath is the remaimber binary to write into Claude Code's config: the one
+// running this setup, by absolute path. A bare "remaimber" would depend on the
+// agent's PATH containing whatever directory it was installed to — usually
+// ~/.local/bin, which is not on every PATH — and the failure is silent.
+func binPath() string {
+	if exe, err := os.Executable(); err == nil {
+		if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+			return resolved
+		}
+		return exe
+	}
+	return "remaimber"
+}
+
 // Run configures Claude Code: hooks in settings.json, and the MCP server where
 // Claude Code actually looks for one.
 func Run() error {
@@ -56,6 +89,7 @@ func Run() error {
 }
 
 func configureHooks(settings map[string]any) {
+	bin := binPath()
 	hooks, _ := settings["hooks"].(map[string]any)
 	if hooks == nil {
 		hooks = make(map[string]any)
@@ -64,7 +98,7 @@ func configureHooks(settings map[string]any) {
 
 	remaimberImport := map[string]any{
 		"type":    "command",
-		"command": "remaimber import >/dev/null 2>&1",
+		"command": bin + " import >/dev/null 2>&1",
 	}
 	// Throttled background maintenance: import new messages, then summarize stale
 	// sessions. Runs on recurring events so work still happens even if SessionEnd
@@ -72,20 +106,20 @@ func configureHooks(settings map[string]any) {
 	// throttled and self-skipping, so this is cheap to fire often.
 	remaimberMaintain := map[string]any{
 		"type":    "command",
-		"command": "{ remaimber import-if-stale; remaimber summarize-if-stale; } >/dev/null 2>&1 &",
+		"command": "{ " + bin + " import-if-stale; " + bin + " summarize-if-stale; } >/dev/null 2>&1 &",
 	}
 	// SessionStart: capture durable identity (foreground, fast, reads stdin),
 	// then run a maintenance sweep that catches up anything left unsummarized by
 	// a previous session that ended uncleanly.
 	remaimberSessionStart := map[string]any{
 		"type":    "command",
-		"command": "remaimber record-identity >/dev/null 2>&1; { remaimber import-if-stale; remaimber summarize-if-stale; } >/dev/null 2>&1 &",
+		"command": bin + " record-identity >/dev/null 2>&1; { " + bin + " import-if-stale; " + bin + " summarize-if-stale; } >/dev/null 2>&1 &",
 	}
 	// On session end (best-effort; not guaranteed to fire): clear the liveness
 	// marker, then import and summarize in the background.
 	remaimberSessionEnd := map[string]any{
 		"type":    "command",
-		"command": "remaimber mark-ended >/dev/null 2>&1; { remaimber import; remaimber summarize-if-stale; } >/dev/null 2>&1 &",
+		"command": bin + " mark-ended >/dev/null 2>&1; { " + bin + " import; " + bin + " summarize-if-stale; } >/dev/null 2>&1 &",
 	}
 
 	for _, event := range []struct {
@@ -122,7 +156,7 @@ func configureHooks(settings map[string]any) {
 					replaced = true
 					continue
 				}
-				if strings.Contains(cmd, "remaimber") {
+				if isOurs(cmd, bin) {
 					replaced = true
 					continue
 				}
@@ -244,7 +278,7 @@ func RegisterMCP() {
 		return
 	}
 	out, err := exec.Command("claude", "mcp", "add", "--scope", "user",
-		"remaimber", "--", "remaimber", "mcp").CombinedOutput()
+		"remaimber", "--", binPath(), "mcp").CombinedOutput()
 	if err != nil {
 		fmt.Printf("Could not register the MCP server (%v). Run it by hand:\n", err)
 		fmt.Println("  claude mcp add --scope user remaimber -- remaimber mcp")

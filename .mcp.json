@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "remaimber": {
-      "command": "remaimber",
-      "args": ["mcp"]
+      "command": "sh",
+      "args": ["-c", "command -v remaimber >/dev/null 2>&1 && exec remaimber mcp; exec \"$HOME/.local/bin/remaimber\" mcp"]
     }
   }
 }
