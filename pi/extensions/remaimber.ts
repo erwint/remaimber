@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { basename } from "node:path";
+import { basename, dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 // remaimber archives pi's conversations alongside Claude Code's and Codex's, so
@@ -11,6 +12,36 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 // Everything here is fire-and-forget. An archiver that can stall or fail a
 // coding session is worse than one that misses an update — the next session's
 // sweep catches whatever this one dropped.
+
+// The CLI lives outside the package, so the package has to be able to fetch it —
+// the Claude Code and Codex plugins run this same script from their SessionStart
+// hook. Without it, installing the pi package alone leaves an extension that
+// spawns a binary nobody has, and says nothing.
+const installer = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "scripts", "ensure-installed.sh");
+
+/** Installs remaimber if it is missing. Exits immediately when it is already there. */
+function ensureInstalled(ctx: ExtensionContext): void {
+  try {
+    const child = spawn("bash", [installer], { stdio: ["ignore", "pipe", "pipe"], detached: true });
+    let said = "";
+    child.stdout?.on("data", (d) => (said += d));
+    child.stderr?.on("data", (d) => (said += d));
+    child.on("error", () => {
+      ctx.ui?.notify?.("remaimber: could not run the installer; conversations are not being archived", "warning");
+    });
+    child.on("exit", (code) => {
+      const message = said.trim();
+      if (code !== 0) {
+        ctx.ui?.notify?.(message || "remaimber: install failed; conversations are not being archived", "warning");
+      } else if (message) {
+        ctx.ui?.notify?.(message, "info"); // only speaks up when it actually installed something
+      }
+    });
+    child.unref();
+  } catch {
+    // Nothing to do: the session is not ours to interrupt.
+  }
+}
 
 /** Runs remaimber detached, ignoring failure — including remaimber not being installed. */
 function fire(args: string[]): void {
@@ -46,6 +77,7 @@ function maintain(): void {
 
 export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
+    ensureInstalled(ctx);
     const id = sessionID(ctx);
     if (id) {
       // Captured now, while the worktree still exists: it is what makes a
