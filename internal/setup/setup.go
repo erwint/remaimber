@@ -11,12 +11,21 @@ import (
 	"github.com/erwint/remaimber/internal/homedir"
 )
 
+// hookMarker ends every hook command setup writes. A shell comment costs
+// nothing and makes the hook identifiable however the binary is named or
+// wherever it was installed, which matters because setup writes it by absolute
+// path and has to recognise its own work on the next run.
+const hookMarker = "# remaimber"
+
 // isOurs recognises a hook remaimber wrote, so setup replaces it rather than
 // adding a second copy. The binary's name is not a reliable marker — it is
 // written by absolute path, and that path is whatever the binary was installed
 // as — so the subcommands count too. They are ours: no other tool runs
 // "import-if-stale".
 func isOurs(cmd, bin string) bool {
+	if strings.Contains(cmd, hookMarker) {
+		return true
+	}
 	if strings.Contains(cmd, "remaimber") || (bin != "" && strings.Contains(cmd, bin)) {
 		return true
 	}
@@ -90,6 +99,7 @@ func Run() error {
 
 func configureHooks(settings map[string]any) {
 	bin := binPath()
+	mark := func(cmd string) string { return cmd + " " + hookMarker }
 	hooks, _ := settings["hooks"].(map[string]any)
 	if hooks == nil {
 		hooks = make(map[string]any)
@@ -98,7 +108,7 @@ func configureHooks(settings map[string]any) {
 
 	remaimberImport := map[string]any{
 		"type":    "command",
-		"command": bin + " import >/dev/null 2>&1",
+		"command": mark(bin + " import >/dev/null 2>&1"),
 	}
 	// Throttled background maintenance: import new messages, then summarize stale
 	// sessions. Runs on recurring events so work still happens even if SessionEnd
@@ -106,20 +116,20 @@ func configureHooks(settings map[string]any) {
 	// throttled and self-skipping, so this is cheap to fire often.
 	remaimberMaintain := map[string]any{
 		"type":    "command",
-		"command": "{ " + bin + " import-if-stale; " + bin + " summarize-if-stale; } >/dev/null 2>&1 &",
+		"command": mark("{ " + bin + " import-if-stale; " + bin + " summarize-if-stale; } >/dev/null 2>&1 &"),
 	}
 	// SessionStart: capture durable identity (foreground, fast, reads stdin),
 	// then run a maintenance sweep that catches up anything left unsummarized by
 	// a previous session that ended uncleanly.
 	remaimberSessionStart := map[string]any{
 		"type":    "command",
-		"command": bin + " record-identity >/dev/null 2>&1; { " + bin + " import-if-stale; " + bin + " summarize-if-stale; } >/dev/null 2>&1 &",
+		"command": mark(bin + " record-identity >/dev/null 2>&1; { " + bin + " import-if-stale; " + bin + " summarize-if-stale; } >/dev/null 2>&1 &"),
 	}
 	// On session end (best-effort; not guaranteed to fire): clear the liveness
 	// marker, then import and summarize in the background.
 	remaimberSessionEnd := map[string]any{
 		"type":    "command",
-		"command": bin + " mark-ended >/dev/null 2>&1; { " + bin + " import; " + bin + " summarize-if-stale; } >/dev/null 2>&1 &",
+		"command": mark(bin + " mark-ended >/dev/null 2>&1; { " + bin + " import; " + bin + " summarize-if-stale; } >/dev/null 2>&1 &"),
 	}
 
 	for _, event := range []struct {
@@ -216,6 +226,43 @@ func mcpRegistered(home string) bool {
 	}
 	_, found := cfg.MCPServers["remaimber"]
 	return found
+}
+
+// HooksInSettings reports whether remaimber's hooks are written into Claude
+// Code's settings files. The files are parsed rather than searched for the word
+// "remaimber": that word also appears in the enabled plugin's name and in the
+// marketplace path, neither of which is a hook, so a substring check says yes
+// for every plugin user.
+func HooksInSettings(home string) bool {
+	for _, p := range []string{
+		filepath.Join(home, ".claude", "settings.json"),
+		filepath.Join(home, ".claude", "settings.local.json"),
+	} {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		var cfg struct {
+			Hooks map[string][]struct {
+				Hooks []struct {
+					Command string `json:"command"`
+				} `json:"hooks"`
+			} `json:"hooks"`
+		}
+		if json.Unmarshal(data, &cfg) != nil {
+			continue
+		}
+		for _, groups := range cfg.Hooks {
+			for _, g := range groups {
+				for _, h := range g.Hooks {
+					if isOurs(h.Command, "") {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
 }
 
 // MCPStatus reports how Claude Code can reach the MCP server: registered in the

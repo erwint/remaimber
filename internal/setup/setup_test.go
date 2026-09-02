@@ -61,6 +61,38 @@ func TestRun_FreshSettings(t *testing.T) {
 	}
 }
 
+// The word "remaimber" appears in settings.json for every plugin user — in the
+// enabled plugin's name and the marketplace path — so hook detection has to read
+// the hooks rather than search the file, or a plugin-only install looks like a
+// duplicate configuration.
+func TestHooksInSettingsReadsHooksNotText(t *testing.T) {
+	home := t.TempDir()
+	settingsPath := filepath.Join(home, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	pluginOnly := `{"enabledPlugins":{"rmb@remaimber":true},
+		"extraKnownMarketplaces":{"remaimber":{"source":{"path":"/src/remaimber"}}},
+		"hooks":{"PreToolUse":[{"hooks":[{"command":"$HOME/.claude/hooks/other.py","type":"command"}]}]}}`
+	if err := os.WriteFile(settingsPath, []byte(pluginOnly), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if HooksInSettings(home) {
+		t.Error("a plugin-only install must not read as hooks in settings.json")
+	}
+
+	// Setup marks what it writes, so a hook is recognised whatever the binary
+	// is called or where it was installed.
+	withHooks := `{"enabledPlugins":{"rmb@remaimber":true},
+		"hooks":{"PreCompact":[{"hooks":[{"command":"/opt/bin/rmb import >/dev/null # remaimber","type":"command"}]}]}}`
+	if err := os.WriteFile(settingsPath, []byte(withHooks), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if !HooksInSettings(home) {
+		t.Error("a hook written by setup must be found, whatever the binary is called")
+	}
+}
+
 // An installation configured by an older version carries the inert block. Setup
 // has to clear it: left in place it reads as a registered server while
 // `claude mcp list` shows none, which is exactly how the search tools went

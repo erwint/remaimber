@@ -2542,15 +2542,7 @@ func doctorCmd() *cobra.Command {
 
 			fmt.Println("Archiving")
 			if home, err := homedir.Dir(); err == nil {
-				hooksSeen := false
-				for _, p := range []string{
-					filepath.Join(home, ".claude", "settings.json"),
-					filepath.Join(home, ".claude", "settings.local.json"),
-				} {
-					if b, err := os.ReadFile(p); err == nil && strings.Contains(string(b), "remaimber") {
-						hooksSeen = true
-					}
-				}
+				hooksSeen := setup.HooksInSettings(home)
 				// The plugin ships its own hooks, so absence from settings.json is
 				// only a problem if the plugin is not providing them either.
 				pluginHooks := false
