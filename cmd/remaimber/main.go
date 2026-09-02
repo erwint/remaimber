@@ -108,6 +108,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(mcpCmd())
 	root.AddCommand(updateCmd())
 	root.AddCommand(pruneCmd())
+	root.AddCommand(forgetCmd())
 	root.AddCommand(completionCmd())
 
 	// Assigned by name so the grouping stays readable, and so a command added
@@ -120,7 +121,7 @@ func newRootCmd() *cobra.Command {
 		"import": "keep", "summarize": "keep", "setup": "keep",
 		"doctor": "keep", "stats": "keep", "update": "keep", "cost": "keep",
 
-		"prune": "maintain", "verify": "maintain", "delete": "maintain",
+		"prune": "maintain", "forget": "maintain", "verify": "maintain", "delete": "maintain",
 		"move": "maintain", "backfill-identity": "maintain",
 		"import-file": "maintain", "mcp": "maintain", "completion": "maintain",
 	}
@@ -906,7 +907,13 @@ func deleteCmd() *cobra.Command {
 			if err := db.DeleteSession(database, sessionID); err != nil {
 				return err
 			}
-			fmt.Printf("Deleted session %s\n", sessionID)
+			// Tombstoned, or the next import reads the transcript straight back
+			// in and the deletion lasts until the next hook fires.
+			if err := db.MarkPruned(database, []string{sessionID}, "deleted"); err != nil {
+				return err
+			}
+			fmt.Printf("Deleted session %s (remaimber forget %s to allow re-import)\n",
+				sessionID, shortID(sessionID))
 			return nil
 		},
 	}
@@ -1967,7 +1974,7 @@ func setupCmd() *cobra.Command {
 // pruning is asked for.
 func pruneCmd() *cobra.Command {
 	var olderThan, mode string
-	var dryRun, vacuum, force bool
+	var dryRun, vacuum bool
 	cmd := &cobra.Command{
 		Use:   "prune",
 		Short: "Drop old content to bound the archive's size",
@@ -1978,10 +1985,9 @@ func pruneCmd() *cobra.Command {
 			"  messages     every message, keeping the session and its summaries, so\n" +
 			"               the archive still remembers what the work was about\n" +
 			"  sessions     the sessions themselves\n\n" +
-			"Deleted messages do not come back on the next import: a transcript whose\n" +
-			"mtime and size are unchanged is skipped. Removing whole sessions is the\n" +
-			"exception, so it only applies to sessions whose transcript is already gone\n" +
-			"unless --force says otherwise.",
+			"Nothing comes back on the next import: a pruned session is tombstoned, so\n" +
+			"a transcript still on disk is left where it is rather than read again.\n" +
+			"`remaimber forget <id>` lifts a tombstone.",
 		Example: `  # What a year's retention would drop, without dropping it
   remaimber prune --older-than 365d --dry-run
 
@@ -2011,17 +2017,8 @@ func pruneCmd() *cobra.Command {
 				return err
 			}
 
-			var ids []string
-			skipped := 0
+			ids := make([]string, 0, len(candidates))
 			for _, c := range candidates {
-				if pruneMode == db.PruneSessions && !force &&
-					importer.SessionFileExists(c.ProjectKey, c.SessionID, c.Agent) {
-					// Its transcript is still on disk, and the session row is
-					// what records that the file was imported — deleting it
-					// would just import the whole thing again.
-					skipped++
-					continue
-				}
 				ids = append(ids, c.SessionID)
 			}
 
@@ -2036,9 +2033,6 @@ func pruneCmd() *cobra.Command {
 			}
 			fmt.Printf("%s %s from %d session(s): %d message(s), %.1f MB\n",
 				verb, pruneMode, stats.Sessions, stats.Messages, float64(stats.Bytes)/(1<<20))
-			if skipped > 0 {
-				fmt.Printf("skipped %d session(s) whose transcript still exists (--force to remove anyway)\n", skipped)
-			}
 			if dryRun || stats.Messages == 0 {
 				return nil
 			}
@@ -2054,7 +2048,6 @@ func pruneCmd() *cobra.Command {
 	cmd.Flags().StringVar(&mode, "mode", string(db.PruneToolOutput), "What to drop: tool-output, messages or sessions")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Report what would be dropped, without dropping it")
 	cmd.Flags().BoolVar(&vacuum, "vacuum", false, "Rebuild the database afterwards so the space is returned")
-	cmd.Flags().BoolVar(&force, "force", false, "With --mode sessions, remove sessions whose transcript still exists")
 	cmd.MarkFlagRequired("older-than")
 	return cmd
 }
@@ -2087,6 +2080,32 @@ func cutoffTime(s string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("unknown unit %q in %q: use d, w, m or y", string(unit), s)
 	}
 	return time.Now().AddDate(0, 0, -days), nil
+}
+
+// forgetCmd lifts a tombstone, so a pruned session may be imported again.
+func forgetCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "forget <session-id>",
+		Short: "Allow a pruned session to be imported again",
+		Long: "Remove the tombstone left by prune or delete.\n\n" +
+			"Pruning records that a session was removed on purpose, so an import\n" +
+			"leaves its transcript alone. This lifts that record; the next import\n" +
+			"reads the transcript again if it still exists.",
+		Example: `  remaimber forget b2bd8168-0cfd-432a-b500-c82c6d9c9701`,
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			database, err := openDB()
+			if err != nil {
+				return err
+			}
+			defer database.Close()
+			if err := db.Forget(database, args[0]); err != nil {
+				return err
+			}
+			fmt.Printf("%s may be imported again\n", args[0])
+			return nil
+		},
+	}
 }
 
 // updateCmd replaces the binary with the newest release. Installing through a
@@ -2172,14 +2191,8 @@ func pruneIfStale() {
 	if err != nil {
 		return
 	}
-	var ids []string
+	ids := make([]string, 0, len(candidates))
 	for _, c := range candidates {
-		// Never remove a session whose transcript is still there: the row is
-		// what records that the file was imported, so it would come straight
-		// back on the next sweep, forever.
-		if mode == db.PruneSessions && importer.SessionFileExists(c.ProjectKey, c.SessionID, c.Agent) {
-			continue
-		}
 		ids = append(ids, c.SessionID)
 	}
 	if stats, err := db.Prune(database, mode, ids, false); err == nil && stats.Messages > 0 {

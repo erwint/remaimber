@@ -85,6 +85,13 @@ func ImportAllWithin(database *sql.DB, force bool, wait time.Duration) (*ImportS
 // ImportFile imports a single JSONL conversation file.
 // Returns whether anything was imported and counts of new/skipped messages.
 func ImportFile(database *sql.DB, sf SessionFile, force bool) (imported bool, newMsgs, skipMsgs int, err error) {
+	// A session removed on purpose stays removed. Without this the next sweep
+	// reads the transcript back in, and "forget this conversation" would mean
+	// "forget it until the next hook fires".
+	if db.IsPruned(database, sf.SessionID) {
+		return false, 0, 0, nil
+	}
+
 	// Check file info
 	info, err := os.Stat(sf.Path)
 	if err != nil {

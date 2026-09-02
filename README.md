@@ -89,10 +89,11 @@ in three grades, cheapest to lose first:
 without dropping. SQLite keeps freed pages for reuse, so the file does not shrink
 until `--vacuum` rewrites it.
 
-Pruned messages do not return on the next import: a transcript whose mtime and
-size are unchanged is skipped. Whole sessions are the exception - the session row
-is what records that a file was imported - so `--mode sessions` only touches
-sessions whose transcript is already gone, unless `--force`.
+Nothing returns on the next import. A pruned session is tombstoned, so a
+transcript still on disk is left where it is rather than read back in - without
+that, removing a session would delete the very row that records the import, and
+the next sweep would undo the prune. `remaimber forget <id>` lifts a tombstone,
+and `remaimber delete` leaves one for the same reason.
 
 For automatic pruning, set `REMAIMBER_RETENTION` (an age) and optionally
 `REMAIMBER_PRUNE_MODE`. The background sweep then applies it once a day. Unset,

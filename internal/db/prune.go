@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // An archive that only grows is a different problem from the one remaimber
@@ -83,12 +84,11 @@ type PruneStats struct {
 
 // Prune applies mode to the given sessions. With dryRun it only measures.
 //
-// Deleting messages does not bring them back on the next import: a file whose
-// mtime and size are unchanged is skipped entirely, so the pruned rows stay
-// pruned unless someone forces a re-import. Removing whole sessions is the
-// exception — the session row is what records that a file was imported, so a
-// transcript still on disk would be read again from scratch. Callers pass only
-// sessions whose transcripts are gone when using PruneSessions.
+// Every pruned session is tombstoned, so nothing comes back. Deleting messages
+// alone would already survive an ordinary import — a transcript whose mtime and
+// size are unchanged is skipped — but deleting the session row removes the very
+// record of that import, and without a tombstone the next sweep would read the
+// file back in full.
 func Prune(db *sql.DB, mode PruneMode, ids []string, dryRun bool) (PruneStats, error) {
 	var stats PruneStats
 	if len(ids) == 0 {
@@ -158,11 +158,67 @@ func Prune(db *sql.DB, mode PruneMode, ids []string, dryRun bool) (PruneStats, e
 				return stats, err
 			}
 		}
+		if err := markPruned(tx, chunk, string(mode)); err != nil {
+			tx.Rollback()
+			return stats, err
+		}
 		if err := tx.Commit(); err != nil {
 			return stats, err
 		}
 	}
 	return stats, nil
+}
+
+// markPruned records that these sessions were removed deliberately.
+func markPruned(tx *sql.Tx, ids []string, reason string) error {
+	stmt, err := tx.Prepare(`INSERT OR REPLACE INTO pruned_sessions (session_id, pruned_at, reason)
+		VALUES (?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	now := time.Now().UTC().Format(time.RFC3339)
+	for _, id := range ids {
+		if _, err := stmt.Exec(id, now, reason); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// MarkPruned tombstones sessions outside a prune — a manual delete leaves the
+// same hole, and would refill it the same way.
+func MarkPruned(db *sql.DB, ids []string, reason string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	if err := markPruned(tx, ids, reason); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+// IsPruned reports whether a session was removed on purpose, so an importer can
+// leave it alone.
+func IsPruned(db *sql.DB, sessionID string) bool {
+	var one int
+	err := db.QueryRow(`SELECT 1 FROM pruned_sessions WHERE session_id = ?`, sessionID).Scan(&one)
+	return err == nil
+}
+
+// Forget drops a tombstone, so the session may be imported again.
+func Forget(db *sql.DB, sessionID string) error {
+	_, err := db.Exec(`DELETE FROM pruned_sessions WHERE session_id = ?`, sessionID)
+	return err
+}
+
+// CountPruned reports how many sessions are tombstoned.
+func CountPruned(db *sql.DB) (int, error) {
+	var n int
+	err := db.QueryRow(`SELECT COUNT(*) FROM pruned_sessions`).Scan(&n)
+	return n, err
 }
 
 // Vacuum rebuilds the database file. SQLite keeps deleted pages for reuse, so

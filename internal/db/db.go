@@ -13,6 +13,16 @@ import (
 )
 
 const schema = `
+-- Sessions removed on purpose. Without this, deleting a session whose transcript
+-- is still on disk deletes nothing for long: the session row is what records
+-- that a file was imported, so the next sweep reads the whole thing back in. The
+-- tombstone is what makes "forget this" mean it.
+CREATE TABLE IF NOT EXISTS pruned_sessions (
+	session_id TEXT PRIMARY KEY,
+	pruned_at  TEXT,
+	reason     TEXT
+);
+
 CREATE TABLE IF NOT EXISTS sessions (
 	session_id      TEXT PRIMARY KEY,
 	project_key     TEXT NOT NULL,

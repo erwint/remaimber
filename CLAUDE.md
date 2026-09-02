@@ -70,10 +70,10 @@ happens.
 `remaimber prune` bounds the archive (`internal/db/prune.go`), in three grades:
 tool output (over half the bytes, already excluded from search), all messages
 but keep the summaries, or whole sessions. Automatic pruning runs from the same
-sweep as the update check, and only when `REMAIMBER_RETENTION` is set. Deleting
-messages is safe against re-import because an unchanged transcript is skipped by
-mtime and size; deleting a session is not, since the row is the import record,
-so that mode skips sessions whose file still exists.
+sweep as the update check, and only when `REMAIMBER_RETENTION` is set. Every removal is
+tombstoned in `pruned_sessions` and `ImportFile` skips those ids: deleting a
+session removes the row that records the import, so without it the next sweep
+reads the transcript back in. `remaimber forget <id>` lifts one.
 
 ## Release
 
