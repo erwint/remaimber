@@ -2627,6 +2627,27 @@ func doctorCmd() *cobra.Command {
 			// whether an agent is set up to keep feeding it.
 			setup.ReportAgents()
 
+			// A binary the user cannot type is half-installed: hooks and the MCP
+			// server reach it by absolute path, so archiving works while every
+			// documented command does not.
+			if exe, err := os.Executable(); err == nil {
+				if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+					exe = resolved
+				}
+				dir := filepath.Dir(exe)
+				onPath := false
+				for _, p := range filepath.SplitList(os.Getenv("PATH")) {
+					if p == dir {
+						onPath = true
+						break
+					}
+				}
+				if !onPath {
+					warn("%s is not on your PATH — add it to run remaimber yourself:", dir)
+					fmt.Printf("        export PATH=\"%s:$PATH\"\n", dir)
+				}
+			}
+
 			fmt.Println("\nSummarization")
 			c, err := db.GetSummaryCoverage(database)
 			if err != nil {

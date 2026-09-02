@@ -4,7 +4,7 @@
       "command": "sh",
       "args": [
         "-c",
-        "PATH=\"$HOME/.local/bin:$HOME/bin:$PATH\"; export PATH; command -v remaimber >/dev/null 2>&1 || bash \"${PLUGIN_ROOT}/scripts/ensure-installed.sh\" >&2 2>&1; exec remaimber mcp"
+        "h=${HOME:-$(eval echo \"~$(id -un)\" 2>/dev/null)}; PATH=\"$h/.local/bin:$h/bin:$PATH\"; export PATH; command -v remaimber >/dev/null 2>&1 || { for i in \"${PLUGIN_ROOT:-/nonexistent}/scripts/ensure-installed.sh\" \"$h\"/.codex/plugins/cache/*/rmb/*/scripts/ensure-installed.sh \"$h\"/.claude/plugins/cache/*/rmb/*/scripts/ensure-installed.sh; do [ -f \"$i\" ] && { bash \"$i\" >&2 2>&1; break; }; done; }; exec remaimber mcp"
       ]
     }
   }
