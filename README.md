@@ -16,13 +16,8 @@ Two routes, and either one is complete on its own.
 ### From an agent
 
 Install the plugin — for pi, the package — and then **start a new session**.
-Plugins load at startup, so nothing happens until you do.
-
-There is no `remaimber setup` step on this route, and running one would write a
-second copy of the hooks. The plugin carries the hooks, the MCP server and the
-skills, and its `SessionStart` hook runs `scripts/ensure-installed.sh`, which
-downloads the CLI to `~/.local/bin` if `remaimber` is missing. So the binary
-arrives with the first session after installing, not during the install itself.
+That is the whole setup: plugins load at startup, and the first session installs
+the CLI if you do not already have it.
 
 ```bash
 # Claude Code — adds /rmb:recall, /rmb:resume, /rmb:sessions
@@ -78,9 +73,19 @@ cannot do — archiving *before* a compaction destroys the context, capturing a
 session's repo identity while its worktree still exists, and giving the agent the
 search tools.
 
-If you installed through a plugin, the CLI is in `~/.local/bin`. Hooks and the
-MCP server fall back to that directory, so archiving works regardless; add it to
-your `PATH` to run `remaimber` yourself.
+### Where the CLI ends up
+
+On the plugin route, the first session downloads `remaimber` into a per-user bin
+directory: `~/.local/bin` or `~/bin`, preferring one your `PATH` already has, so
+that you can run it yourself without doing anything.
+
+If neither is on your `PATH` it installs to `~/.local/bin` and says so. Archiving
+still works — the hooks and the MCP server look there directly — but to run
+`remaimber` from a shell, add it:
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc   # or ~/.bashrc
+```
 
 ## Usage
 

@@ -6,7 +6,19 @@
 set -euo pipefail
 
 REPO="erwint/remaimber"
-INSTALL_DIR="${HOME}/.local/bin"
+
+# Install into a directory the user's PATH already has, so `remaimber` works in
+# their shell with no further setup. Only conventional per-user bin directories
+# are considered — scattering a binary into whatever happens to be writable would
+# be worse than the fallback. That fallback is ~/.local/bin, which the hooks and
+# the MCP server look in regardless of PATH.
+INSTALL_DIR=""
+for candidate in "${HOME}/.local/bin" "${HOME}/bin"; do
+  case ":${PATH}:" in
+    *":${candidate}:"*) INSTALL_DIR="$candidate"; break ;;
+  esac
+done
+INSTALL_DIR="${INSTALL_DIR:-${HOME}/.local/bin}"
 
 if command -v remaimber &>/dev/null; then
   exit 0
@@ -39,8 +51,9 @@ echo "remaimber ${LATEST} installed to ${INSTALL_DIR}/remaimber"
 case ":${PATH}:" in
   *":${INSTALL_DIR}:"*) ;;
   *)
-    echo "remaimber: ${INSTALL_DIR} is not on PATH." >&2
-    echo "remaimber: the hooks and the MCP server fall back to it, but add this to your shell profile so you can run it too:" >&2
+    echo "remaimber: installed to ${INSTALL_DIR}, which is not on your PATH." >&2
+    echo "remaimber: archiving works anyway — the hooks and the MCP server look there directly." >&2
+    echo "remaimber: to run it yourself, add to ~/.zshrc (or ~/.bashrc):" >&2
     echo "           export PATH=\"${INSTALL_DIR}:\$PATH\"" >&2
     ;;
 esac
