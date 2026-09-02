@@ -15,17 +15,21 @@ Two routes, and either one is complete on its own.
 
 ### From an agent
 
-Install the plugin (or, for pi, the package). It carries the hooks and the search
-tools, and its `SessionStart` hook runs `scripts/ensure-installed.sh`, which
-downloads the CLI from the latest release to `~/.local/bin` when `remaimber` is
-missing. Nothing else to do.
+Install the plugin — for pi, the package — and then **start a new session**.
+Plugins load at startup, so nothing happens until you do.
+
+There is no `remaimber setup` step on this route, and running one would write a
+second copy of the hooks. The plugin carries the hooks, the MCP server and the
+skills, and its `SessionStart` hook runs `scripts/ensure-installed.sh`, which
+downloads the CLI to `~/.local/bin` if `remaimber` is missing. So the binary
+arrives with the first session after installing, not during the install itself.
 
 ```bash
 # Claude Code — adds /rmb:recall, /rmb:resume, /rmb:sessions
 claude plugin marketplace add erwint/remaimber
 claude plugin install rmb@remaimber
 
-# Codex 0.148.0+ — then run /hooks once inside Codex and trust them
+# Codex 0.148.0+ — then, in the new session, run /hooks once and trust them
 codex plugin marketplace add erwint/remaimber
 codex plugin add rmb@remaimber
 
