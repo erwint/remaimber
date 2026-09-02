@@ -88,6 +88,17 @@ func AcquireUpdateLock() *os.File {
 	return AcquireLock(".last-update-check")
 }
 
+// ShouldPrune reports whether a retention sweep is due. Daily, like the update
+// check: retention is measured in months, so nothing is gained by asking often.
+func ShouldPrune() bool {
+	return ShouldRun(".last-prune", UpdateCheckInterval)
+}
+
+// AcquirePruneLock takes the retention throttle lock.
+func AcquirePruneLock() *os.File {
+	return AcquireLock(".last-prune")
+}
+
 // ShouldSummarize reports whether a throttled background summary sweep is due.
 func ShouldSummarize() bool {
 	return ShouldRun(".last-summary", ThrottledSummarizeInterval)

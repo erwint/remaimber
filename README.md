@@ -1,6 +1,6 @@
 # remaimber
 
-Archive, search, and resume coding-agent conversations — Claude Code, Codex and
+Archive, search, and resume coding-agent conversations - Claude Code, Codex and
 pi in one archive. A Go CLI and MCP server that keeps every conversation in
 SQLite with FTS5 full-text search.
 
@@ -15,16 +15,16 @@ Two routes, and either one is complete on its own.
 
 ### From an agent
 
-Install the plugin — for pi, the package — and then **start a new session**.
+Install the plugin - for pi, the package - and then **start a new session**.
 That is the whole setup: plugins load at startup, and the first session installs
 the CLI if you do not already have it.
 
 ```bash
-# Claude Code — adds /rmb:recall, /rmb:resume, /rmb:sessions
+# Claude Code - adds /rmb:recall, /rmb:resume, /rmb:sessions
 claude plugin marketplace add erwint/remaimber
 claude plugin install rmb@remaimber
 
-# Codex 0.148.0+ — then, in the new session, run /hooks once and trust them
+# Codex 0.148.0+ - then, in the new session, run /hooks once and trust them
 codex plugin marketplace add erwint/remaimber
 codex plugin add rmb@remaimber
 
@@ -44,7 +44,7 @@ remaimber setup                            # every agent it finds
 remaimber setup --agent codex --dry-run    # one of them, or just look
 ```
 
-Same result as running the commands above by hand — each agent installs its own
+Same result as running the commands above by hand - each agent installs its own
 plugin, which is where the hooks and the search tools live. Restart an agent
 after wiring it up.
 
@@ -52,7 +52,7 @@ For Claude Code without a marketplace plugin, `remaimber setup --no-plugin`
 writes hooks to `~/.claude/settings.json` and registers the MCP server with
 `claude mcp add --scope user`, the only place Claude Code reads user-scope
 servers from. Use one route or the other: both write the same hooks, and both
-firing means every event runs twice — which is why setup declines to add them
+firing means every event runs twice - which is why setup declines to add them
 when a plugin already does.
 
 `remaimber doctor` reports the same picture at any time: which agents are
@@ -63,15 +63,40 @@ installed, which are wired up, and what finishes the job.
 | | |
 |---|---|
 | Claude Code | any version with plugin or hook support |
-| Codex | **0.148.0+** — asynchronous command hooks. Older versions log `skipping async hooks, not supported yet` and run only the synchronous ones, so the archive is still written before a compaction but background maintenance never fires |
+| Codex | **0.148.0+** - asynchronous command hooks. Older versions log `skipping async hooks, not supported yet` and run only the synchronous ones, so the archive is still written before a compaction but background maintenance never fires |
 | pi | 0.84+ |
 | Go | 1.26+, to build from source |
 
 Nothing above is required to archive: `remaimber import` reads every agent's
 transcripts off disk on its own. Wiring an agent up adds what a periodic import
-cannot do — archiving *before* a compaction destroys the context, capturing a
+cannot do - archiving *before* a compaction destroys the context, capturing a
 session's repo identity while its worktree still exists, and giving the agent the
 search tools.
+
+### Pruning
+
+The archive only grows, and over half of it by volume is tool output - command
+and file output that search already ignores. `remaimber prune` drops old content
+in three grades, cheapest to lose first:
+
+| `--mode` | drops | keeps |
+|---|---|---|
+| `tool-output` (default) | command and file output | the conversation, summaries, segments |
+| `messages` | every message | the session and its summaries, so recall still finds it |
+| `sessions` | the sessions themselves | nothing |
+
+`--older-than` takes an age (`90d`, `18m`, `2y`) or a date. `--dry-run` measures
+without dropping. SQLite keeps freed pages for reuse, so the file does not shrink
+until `--vacuum` rewrites it.
+
+Pruned messages do not return on the next import: a transcript whose mtime and
+size are unchanged is skipped. Whole sessions are the exception - the session row
+is what records that a file was imported - so `--mode sessions` only touches
+sessions whose transcript is already gone, unless `--force`.
+
+For automatic pruning, set `REMAIMBER_RETENTION` (an age) and optionally
+`REMAIMBER_PRUNE_MODE`. The background sweep then applies it once a day. Unset,
+nothing is ever dropped: the archive exists to outlive the agents' own retention.
 
 ### Staying current
 
@@ -79,33 +104,33 @@ search tools.
 sweep also checks once a day and updates in place, because neither install route
 does it otherwise: a plugin updates itself through its marketplace, while its
 install hook only runs when the CLI is *missing*. A binary built from source is
-left alone — it has no release version to compare against.
+left alone - it has no release version to compare against.
 
 ### Where the CLI ends up
 
 On the plugin route, the first session downloads `remaimber` into a directory
-your `PATH` already has — `~/.local/bin`, `~/bin`, or a writable
-`/usr/local/bin` — so it is runnable straight away.
+your `PATH` already has - `~/.local/bin`, `~/bin`, or a writable
+`/usr/local/bin` - so it is runnable straight away.
 
 If none of those is on your `PATH`, it installs to `~/.local/bin` and appends one
 marked line to your shell profile (`~/.zshrc` or `~/.bash_profile`), so a new
 shell finds it. The line is added once and never duplicated. To keep your profile
-untouched, set `REMAIMBER_NO_PATH_EDIT=1` — archiving works regardless, since the
+untouched, set `REMAIMBER_NO_PATH_EDIT=1` - archiving works regardless, since the
 hooks and the MCP server look in `~/.local/bin` directly.
 
 ## Using it from an agent
 
-The three skills — **recall**, **resume**, **sessions** — are reached differently
+The three skills - **recall**, **resume**, **sessions** - are reached differently
 in each agent, because each has its own convention:
 
 | agent | how to invoke |
 |---|---|
 | Claude Code | `/rmb:recall`, `/rmb:resume`, `/rmb:sessions` |
-| Codex | `$rmb:recall`, `$rmb:resume`, `$rmb:sessions` — or `/skills` to browse |
+| Codex | `$rmb:recall`, `$rmb:resume`, `$rmb:sessions` - or `/skills` to browse |
 | pi | `/skill:recall`, `/skill:resume`, `/skill:sessions` |
 
-In all three you can also just ask — "find the conversation where we set up the
-mail relay", "what did I work on last week?" — since each skill's description is
+In all three you can also just ask - "find the conversation where we set up the
+mail relay", "what did I work on last week?" - since each skill's description is
 in the model's context and it loads the right one.
 
 ## Usage
@@ -153,6 +178,10 @@ remaimber stats
 remaimber update
 remaimber update --check
 
+# Bound the archive's size (nothing is dropped unless you ask)
+remaimber prune --older-than 180d --dry-run
+remaimber prune --older-than 180d --vacuum
+
 # Maintenance
 remaimber verify
 remaimber delete <session-id>
@@ -183,7 +212,7 @@ meaning the current repo or subpath, resolved from the server's working
 directory.
 
 `find_context`, `search_conversations` and `list_sessions` also take `agent`,
-which defaults to the conversations of whichever agent is calling — identified
+which defaults to the conversations of whichever agent is calling - identified
 from the MCP client name, since an agent asking through MCP is nearly always
 looking for its own earlier work. Pass `agent: "all"` for every agent, or name
 one. The CLI defaults the other way: it searches everything, and `--agent`
@@ -203,18 +232,18 @@ command for that agent.
 
 Sessions are grouped by project. Claude Code and pi encode the directory in their
 storage path; Codex files rollouts by date instead, so its project comes from the
-cwd recorded in each rollout's own header — which puts it in the same bucket as
+cwd recorded in each rollout's own header - which puts it in the same bucket as
 the other agents' sessions for that directory.
 
 Adding an agent is retroactive: the next import picks up its whole history, not
 only new sessions. Summaries follow on their own, or immediately with
-`remaimber summarize --all`. Repo identity does not — run
+`remaimber summarize --all`. Repo identity does not - run
 `remaimber backfill-identity` once so `--repo .` finds older sessions.
 
 ## Cross-worktree find & resume
 
 Claude Code keys session storage by launch directory, so one repo scatters across
-many project keys — one per worktree — and native `--resume` cannot see sessions
+many project keys - one per worktree - and native `--resume` cannot see sessions
 from another worktree, or from a temporary worktree that has since been deleted.
 
 remaimber captures a **durable identity** for every session at start: a
@@ -222,8 +251,8 @@ remaimber captures a **durable identity** for every session at start: a
 across every worktree of a repo) and `subpath` (`git rev-parse --show-prefix`).
 Captured at the start, it survives the worktree. So:
 
-- `remaimber list --repo .` — every session for this repo, whatever worktree it ran in
-- `remaimber resume <id>` — link that transcript under the current directory's project key, so `claude --resume <id>` works *here*
+- `remaimber list --repo .` - every session for this repo, whatever worktree it ran in
+- `remaimber resume <id>` - link that transcript under the current directory's project key, so `claude --resume <id>` works *here*
 
 Resume warns when the chosen session looks like it is still running elsewhere;
 resuming a live transcript corrupts it. Liveness is judged by the transcript's
@@ -237,12 +266,14 @@ by itself.
 | `REMAIMBER_DB` | `~/.remaimber/remaimber.db` | Database path. One archive for every agent |
 | `REMAIMBER_LLM` | `claude` | Summary backend: `claude` (the local CLI) or an OpenAI-compatible base URL (`http://localhost:11434/v1` for Ollama, `http://localhost:1234/v1` for LM Studio) |
 | `REMAIMBER_LLM_MODEL` | `haiku` (claude backend) | Model used for summarization |
-| `REMAIMBER_LLM_KEY` | — | Bearer token for the HTTP backend |
+| `REMAIMBER_LLM_KEY` | - | Bearer token for the HTTP backend |
+| `REMAIMBER_RETENTION` | - | Age after which the daily sweep prunes (`180d`, `2y`). Unset means keep everything |
+| `REMAIMBER_PRUNE_MODE` | `tool-output` | What that sweep drops: `tool-output`, `messages` or `sessions` |
 
 ### Summaries
 
-A long conversation is summarized in **segments**, so it can be recalled — or
-resumed in part — without reading all of it. Summaries come from a throttled
+A long conversation is summarized in **segments**, so it can be recalled - or
+resumed in part - without reading all of it. Summaries come from a throttled
 background sweep wired into recurring hooks (`SessionStart`, `Notification`,
 `SessionEnd` and their equivalents), deliberately not `SessionEnd` alone: that
 event is not guaranteed to fire, and a machine killed overnight would leave its
@@ -250,7 +281,7 @@ sessions unsummarized forever. The sweep throttles itself (15 minutes by
 default), so firing it often costs nothing.
 
 The rolling summary is offset-based and incremental, so the sweep also
-checkpoints *active* sessions — each pass folds in only what was added since the
+checkpoints *active* sessions - each pass folds in only what was added since the
 last one. A session interrupted by a crash is still recallable from a summary at
 most one interval old.
 
@@ -274,7 +305,7 @@ the summary alone, so archived content cannot inject its way into a summary.
 
 ## How it works
 
-Agents store conversations as JSONL — `~/.claude/projects/` for Claude Code,
+Agents store conversations as JSONL - `~/.claude/projects/` for Claude Code,
 `~/.codex/sessions/` for Codex, `~/.pi/agent/sessions/` for pi. Each format is
 parsed by its own scanner into one shared shape, so search, summarization and
 resume behave the same whichever agent a conversation came from.
@@ -285,5 +316,5 @@ The archive at `~/.remaimber/remaimber.db` keeps:
 - **FTS5 search** with porter stemming and date/role/project/agent filters
 - **UUID and content-hash dedup**, so a re-import cannot duplicate anything
 - **Byte-offset tracking**, so an import reads only what is new
-- **One importer at a time** — hooks fire from several agents at once, so importers take a lock and wait briefly instead of contending inside SQLite; one that cannot get in skips, because the running import covers the same files
-- **Cleaned text** — each agent's injected scaffolding is stripped from the search index, so a search matches conversation rather than boilerplate
+- **One importer at a time** - hooks fire from several agents at once, so importers take a lock and wait briefly instead of contending inside SQLite; one that cannot get in skips, because the running import covers the same files
+- **Cleaned text** - each agent's injected scaffolding is stripped from the search index, so a search matches conversation rather than boilerplate

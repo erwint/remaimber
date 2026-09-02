@@ -97,9 +97,38 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(recallCmd())
 	root.AddCommand(verifyCmd())
 	root.AddCommand(setupCmd())
+	root.AddGroup(
+		&cobra.Group{ID: "find", Title: "Finding past work:"},
+		&cobra.Group{ID: "keep", Title: "Keeping the archive:"},
+		&cobra.Group{ID: "maintain", Title: "Maintenance:"},
+	)
+	root.SetHelpCommandGroupID("maintain")
+	root.SetCompletionCommandGroupID("maintain")
+
 	root.AddCommand(mcpCmd())
 	root.AddCommand(updateCmd())
+	root.AddCommand(pruneCmd())
 	root.AddCommand(completionCmd())
+
+	// Assigned by name so the grouping stays readable, and so a command added
+	// without a group lands under "Additional Commands" rather than silently
+	// in the wrong one.
+	groups := map[string]string{
+		"search": "find", "recall": "find", "resume": "find", "list": "find",
+		"show": "find", "summary": "find", "export": "find",
+
+		"import": "keep", "summarize": "keep", "setup": "keep",
+		"doctor": "keep", "stats": "keep", "update": "keep", "cost": "keep",
+
+		"prune": "maintain", "verify": "maintain", "delete": "maintain",
+		"move": "maintain", "backfill-identity": "maintain",
+		"import-file": "maintain", "mcp": "maintain", "completion": "maintain",
+	}
+	for _, c := range root.Commands() {
+		if id, ok := groups[c.Name()]; ok {
+			c.GroupID = id
+		}
+	}
 
 	return root
 }
@@ -136,7 +165,7 @@ func importCmd() *cobra.Command {
 	var force bool
 	cmd := &cobra.Command{
 		Use:   "import",
-		Short: "Import conversations from ~/.claude/projects/",
+		Short: "Import conversations from every agent's transcripts",
 		Example: `  # Import anything new since the last run
   remaimber import
 
@@ -182,6 +211,7 @@ func importIfStaleCmd() *cobra.Command {
 			// adding a command to hooks.json would change every hook's hash, and
 			// Codex makes the user re-trust them when that happens.
 			updateIfStale(cmd.Context())
+			pruneIfStale()
 
 			if !importer.ShouldImport() {
 				return nil
@@ -1931,6 +1961,134 @@ func setupCmd() *cobra.Command {
 	return cmd
 }
 
+// pruneCmd bounds the archive. remaimber exists because agents throw
+// transcripts away too early, so nothing is pruned unless asked: the default is
+// to keep everything, and the mode that keeps the most is the default when
+// pruning is asked for.
+func pruneCmd() *cobra.Command {
+	var olderThan, mode string
+	var dryRun, vacuum, force bool
+	cmd := &cobra.Command{
+		Use:   "prune",
+		Short: "Drop old content to bound the archive's size",
+		Long: "Drop old content to bound the archive's size.\n\n" +
+			"Three modes, from cheapest to lose to most:\n" +
+			"  tool-output  command and file output only — the bulk of an agentic\n" +
+			"               transcript, already excluded from search (default)\n" +
+			"  messages     every message, keeping the session and its summaries, so\n" +
+			"               the archive still remembers what the work was about\n" +
+			"  sessions     the sessions themselves\n\n" +
+			"Deleted messages do not come back on the next import: a transcript whose\n" +
+			"mtime and size are unchanged is skipped. Removing whole sessions is the\n" +
+			"exception, so it only applies to sessions whose transcript is already gone\n" +
+			"unless --force says otherwise.",
+		Example: `  # What a year's retention would drop, without dropping it
+  remaimber prune --older-than 365d --dry-run
+
+  # Drop tool output older than six months, and return the space
+  remaimber prune --older-than 180d --vacuum
+
+  # Forget old conversations entirely
+  remaimber prune --older-than 2y --mode sessions`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			pruneMode, err := db.ParsePruneMode(mode)
+			if err != nil {
+				return err
+			}
+			cutoff, err := cutoffTime(olderThan)
+			if err != nil {
+				return err
+			}
+
+			database, err := openDB()
+			if err != nil {
+				return err
+			}
+			defer database.Close()
+
+			candidates, err := db.PruneCandidates(database, cutoff.UTC().Format(time.RFC3339))
+			if err != nil {
+				return err
+			}
+
+			var ids []string
+			skipped := 0
+			for _, c := range candidates {
+				if pruneMode == db.PruneSessions && !force &&
+					importer.SessionFileExists(c.ProjectKey, c.SessionID, c.Agent) {
+					// Its transcript is still on disk, and the session row is
+					// what records that the file was imported — deleting it
+					// would just import the whole thing again.
+					skipped++
+					continue
+				}
+				ids = append(ids, c.SessionID)
+			}
+
+			stats, err := db.Prune(database, pruneMode, ids, dryRun)
+			if err != nil {
+				return err
+			}
+
+			verb := "pruned"
+			if dryRun {
+				verb = "would prune"
+			}
+			fmt.Printf("%s %s from %d session(s): %d message(s), %.1f MB\n",
+				verb, pruneMode, stats.Sessions, stats.Messages, float64(stats.Bytes)/(1<<20))
+			if skipped > 0 {
+				fmt.Printf("skipped %d session(s) whose transcript still exists (--force to remove anyway)\n", skipped)
+			}
+			if dryRun || stats.Messages == 0 {
+				return nil
+			}
+			if !vacuum {
+				fmt.Println("the file keeps its size until the pages are reclaimed — run with --vacuum")
+				return nil
+			}
+			fmt.Println("reclaiming space (this rewrites the database)...")
+			return db.Vacuum(database)
+		},
+	}
+	cmd.Flags().StringVar(&olderThan, "older-than", "", "Age cutoff: 90d, 18m, 2y, or a date (2026-01-01)")
+	cmd.Flags().StringVar(&mode, "mode", string(db.PruneToolOutput), "What to drop: tool-output, messages or sessions")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Report what would be dropped, without dropping it")
+	cmd.Flags().BoolVar(&vacuum, "vacuum", false, "Rebuild the database afterwards so the space is returned")
+	cmd.Flags().BoolVar(&force, "force", false, "With --mode sessions, remove sessions whose transcript still exists")
+	cmd.MarkFlagRequired("older-than")
+	return cmd
+}
+
+// cutoffTime reads an age ("90d", "18m", "2y") or an ISO date.
+func cutoffTime(s string) (time.Time, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}, fmt.Errorf("--older-than is required: an age (90d, 18m, 2y) or a date")
+	}
+	if t, err := time.Parse("2006-01-02", s); err == nil {
+		return t, nil
+	}
+	unit := s[len(s)-1]
+	n, err := strconv.Atoi(s[:len(s)-1])
+	if err != nil || n <= 0 {
+		return time.Time{}, fmt.Errorf("cannot read %q as an age: try 90d, 18m, 2y or a date", s)
+	}
+	var days int
+	switch unit {
+	case 'd':
+		days = n
+	case 'w':
+		days = n * 7
+	case 'm':
+		days = n * 30
+	case 'y':
+		days = n * 365
+	default:
+		return time.Time{}, fmt.Errorf("unknown unit %q in %q: use d, w, m or y", string(unit), s)
+	}
+	return time.Now().AddDate(0, 0, -days), nil
+}
+
 // updateCmd replaces the binary with the newest release. Installing through a
 // plugin never updates the CLI — the install hook only fires when it is missing
 // — so without this a machine keeps whatever version first landed.
@@ -1973,6 +2131,61 @@ func updateCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&checkOnly, "check", false, "Report whether a newer release exists, without installing it")
 	return cmd
+}
+
+// pruneIfStale applies REMAIMBER_RETENTION once a day. Nothing happens unless
+// that variable is set: an archive exists to outlive the agents' own retention,
+// so forgetting is opt-in, and the mode that keeps the most is the default.
+func pruneIfStale() {
+	retention := strings.TrimSpace(os.Getenv("REMAIMBER_RETENTION"))
+	if retention == "" || !importer.ShouldPrune() {
+		return
+	}
+	cutoff, err := cutoffTime(retention)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "remaimber: REMAIMBER_RETENTION=%q: %v\n", retention, err)
+		return
+	}
+	mode := db.PruneToolOutput
+	if m := os.Getenv("REMAIMBER_PRUNE_MODE"); m != "" {
+		parsed, err := db.ParsePruneMode(m)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "remaimber: %v\n", err)
+			return
+		}
+		mode = parsed
+	}
+
+	lock := importer.AcquirePruneLock()
+	if lock == nil {
+		return
+	}
+	defer importer.TouchAndRelease(lock)
+
+	database, err := openDB()
+	if err != nil {
+		return
+	}
+	defer database.Close()
+
+	candidates, err := db.PruneCandidates(database, cutoff.UTC().Format(time.RFC3339))
+	if err != nil {
+		return
+	}
+	var ids []string
+	for _, c := range candidates {
+		// Never remove a session whose transcript is still there: the row is
+		// what records that the file was imported, so it would come straight
+		// back on the next sweep, forever.
+		if mode == db.PruneSessions && importer.SessionFileExists(c.ProjectKey, c.SessionID, c.Agent) {
+			continue
+		}
+		ids = append(ids, c.SessionID)
+	}
+	if stats, err := db.Prune(database, mode, ids, false); err == nil && stats.Messages > 0 {
+		fmt.Fprintf(os.Stderr, "remaimber: pruned %s from %d session(s) older than %s (%.1f MB)\n",
+			mode, stats.Sessions, retention, float64(stats.Bytes)/(1<<20))
+	}
 }
 
 // updateIfStale checks for a release at most once a day and installs it. Fails

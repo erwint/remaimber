@@ -67,6 +67,14 @@ sweep checks once a day (`internal/selfupdate`). The check rides on
 changes every hook's hash, and Codex makes the user re-trust them when that
 happens.
 
+`remaimber prune` bounds the archive (`internal/db/prune.go`), in three grades:
+tool output (over half the bytes, already excluded from search), all messages
+but keep the summaries, or whole sessions. Automatic pruning runs from the same
+sweep as the update check, and only when `REMAIMBER_RETENTION` is set. Deleting
+messages is safe against re-import because an unchanged transcript is skipped by
+mtime and size; deleting a session is not, since the row is the import record,
+so that mode skips sessions whose file still exists.
+
 ## Release
 
 ```bash
