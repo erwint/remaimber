@@ -29,8 +29,10 @@ mkdir -p "$INSTALL_DIR"
 curl -fsSL "$URL" | tar -xz -C "$INSTALL_DIR" remaimber
 chmod +x "${INSTALL_DIR}/remaimber"
 
-# Configure MCP server if not already present
-remaimber setup >/dev/null 2>&1 || true
+# Deliberately no `remaimber setup` here. The plugin already supplies the hooks
+# and the MCP server, so running setup would write a second copy of the hooks
+# into settings.json and fire everything twice — and setup now wires up Codex and
+# pi as well, which is not a Claude Code hook's business.
 
 echo "remaimber ${LATEST} installed to ${INSTALL_DIR}/remaimber"
 case ":${PATH}:" in

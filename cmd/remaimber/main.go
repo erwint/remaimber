@@ -50,7 +50,7 @@ func newRootCmd() *cobra.Command {
 		Long: "Archive and search coding-agent conversations — Claude Code, Codex and pi in one archive.\n\n" +
 			"Transcripts are imported into SQLite and indexed, then summarized in segments so a\n" +
 			"long conversation can be recalled — or resumed in part — without reading all of it.",
-		Example: `  # One-time setup: install the import hooks and register the MCP server
+		Example: `  # One-time setup: wire up every coding agent on this machine
   remaimber setup
 
   # Find something you discussed before, in any agent's conversations
@@ -2558,6 +2558,12 @@ func doctorCmd() *cobra.Command {
 					pluginHooks = strings.Contains(string(b), `"rmb@remaimber": true`)
 				}
 				switch {
+				case hooksSeen && pluginHooks:
+					// Both routes install the same hooks, so every event fires
+					// twice. The import lock makes the duplicate a no-op rather
+					// than a hazard, but it is wasted work either way.
+					warn("hooks are configured twice — settings.json and the plugin both provide them; " +
+						"keep one (uninstall the plugin, or remove the remaimber hooks from settings.json)")
 				case hooksSeen || pluginHooks:
 					ok("import hooks are configured")
 				default:
