@@ -19,8 +19,21 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 // spawns a binary nobody has, and says nothing.
 const installer = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "scripts", "ensure-installed.sh");
 
-/** Installs remaimber if it is missing. Exits immediately when it is already there. */
-function ensureInstalled(ctx: ExtensionContext): void {
+/**
+ * Installs remaimber if it is missing, then runs `then`. The callback matters on
+ * a machine that has the package but not yet the binary: anything fired before
+ * the download lands spawns a command that does not exist, so the first session
+ * would archive nothing and say nothing. Exits immediately — and calls back
+ * immediately — when remaimber is already there.
+ */
+function ensureInstalled(ctx: ExtensionContext, then: () => void): void {
+  let ran = false;
+  const once = () => {
+    if (!ran) {
+      ran = true;
+      then();
+    }
+  };
   try {
     const child = spawn("bash", [installer], { stdio: ["ignore", "pipe", "pipe"], detached: true });
     let said = "";
@@ -28,6 +41,7 @@ function ensureInstalled(ctx: ExtensionContext): void {
     child.stderr?.on("data", (d) => (said += d));
     child.on("error", () => {
       ctx.ui?.notify?.("remaimber: could not run the installer; conversations are not being archived", "warning");
+      once();
     });
     child.on("exit", (code) => {
       const message = said.trim();
@@ -36,10 +50,11 @@ function ensureInstalled(ctx: ExtensionContext): void {
       } else if (message) {
         ctx.ui?.notify?.(message, "info"); // only speaks up when it actually installed something
       }
+      once();
     });
     child.unref();
   } catch {
-    // Nothing to do: the session is not ours to interrupt.
+    once(); // the archive is best-effort; a failed spawn must not stall the session
   }
 }
 
@@ -77,17 +92,18 @@ function maintain(): void {
 
 export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
-    ensureInstalled(ctx);
     const id = sessionID(ctx);
-    if (id) {
-      // Captured now, while the worktree still exists: it is what makes a
-      // session started in a temporary worktree findable after that worktree is
-      // gone.
-      fire(["record-identity", "--session", id, "--cwd", process.cwd()]);
-    }
-    // Also catches up whatever a previous session left unfinished when it ended
-    // uncleanly.
-    maintain();
+    const cwd = process.cwd();
+    ensureInstalled(ctx, () => {
+      if (id) {
+        // Captured while the worktree still exists: it is what makes a session
+        // started in a temporary worktree findable after that worktree is gone.
+        fire(["record-identity", "--session", id, "--cwd", cwd]);
+      }
+      // Also catches up whatever a previous session left unfinished when it
+      // ended uncleanly.
+      maintain();
+    });
   });
 
   // A settled agent is the recurring, cheap moment to archive: the turn is over,

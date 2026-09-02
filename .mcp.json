@@ -2,7 +2,10 @@
   "mcpServers": {
     "remaimber": {
       "command": "sh",
-      "args": ["-c", "command -v remaimber >/dev/null 2>&1 && exec remaimber mcp; exec \"$HOME/.local/bin/remaimber\" mcp"]
+      "args": [
+        "-c",
+        "PATH=\"$HOME/.local/bin:$HOME/bin:$PATH\"; export PATH; command -v remaimber >/dev/null 2>&1 || bash \"${CLAUDE_PLUGIN_ROOT}/scripts/ensure-installed.sh\" >&2 2>&1; exec remaimber mcp"
+      ]
     }
   }
 }

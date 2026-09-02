@@ -1,7 +1,7 @@
 {
   "name": "rmb",
   "description": "Search and recall archived Claude Code, Codex and pi conversations",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "homepage": "https://github.com/erwint/remaimber",
   "mcpServers": "./.mcp.json",
   "author": {

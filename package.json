@@ -1,6 +1,6 @@
 {
   "name": "remaimber",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "Archive and search Codex, Claude Code and pi conversations with SQLite FTS5",
   "license": "MIT",
   "repository": "https://github.com/erwint/remaimber",
