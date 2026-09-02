@@ -93,7 +93,7 @@ in each agent, because each has its own convention:
 | agent | how to invoke |
 |---|---|
 | Claude Code | `/rmb:recall`, `/rmb:resume`, `/rmb:sessions` |
-| Codex | `/skills`, then pick one — Codex has no plugin slash commands |
+| Codex | `$rmb:recall`, `$rmb:resume`, `$rmb:sessions` — or `/skills` to browse |
 | pi | `/skill:recall`, `/skill:resume`, `/skill:sessions` |
 
 In all three you can also just ask — "find the conversation where we set up the
