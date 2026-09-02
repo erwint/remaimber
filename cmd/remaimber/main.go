@@ -1882,7 +1882,7 @@ func verifyCmd() *cobra.Command {
 
 func setupCmd() *cobra.Command {
 	var agent string
-	var dryRun bool
+	var dryRun, force bool
 	cmd := &cobra.Command{
 		Use: "setup",
 		Example: `  # Wire up every agent found on this machine
@@ -1906,9 +1906,16 @@ func setupCmd() *cobra.Command {
 				return fmt.Errorf("unknown agent %q: want claude, codex or pi", agent)
 			}
 			if agent == "" || agent == importer.AgentClaude {
-				if dryRun {
+				home, _ := homedir.Dir()
+				switch {
+				case !force && setup.PluginProvidesHooks(home):
+					// Writing them here too would fire every event twice.
+					fmt.Println("claude: the rmb plugin already provides the hooks — leaving settings.json alone")
+					fmt.Println("        (--force writes them anyway; --agent codex|pi for the others)")
+					setup.RegisterMCP()
+				case dryRun:
 					fmt.Println("claude: would write hooks to settings.json and register the MCP server")
-				} else {
+				default:
 					if err := setup.Run(); err != nil {
 						return err
 					}
@@ -1921,6 +1928,7 @@ func setupCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&agent, "agent", "", "Only wire up this agent: claude, codex or pi")
+	cmd.Flags().BoolVar(&force, "force", false, "Write Claude Code's hooks even when the plugin already provides them")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print what would be done, without doing it")
 	return cmd
 }

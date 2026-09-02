@@ -126,6 +126,47 @@ func claudeStatus(home string) AgentStatus {
 	return s
 }
 
+// PluginProvidesHooks reports whether an enabled rmb plugin already supplies the
+// lifecycle hooks. Writing them into settings.json as well makes every event
+// fire twice, so setup checks before configuring Claude Code.
+func PluginProvidesHooks(home string) bool {
+	settings, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
+	if err != nil || !strings.Contains(string(settings), `"rmb@remaimber": true`) {
+		return false
+	}
+	return pluginPathWith(home, "hooks/hooks.json") != ""
+}
+
+// pluginPathWith returns the installed plugin's path when it contains rel.
+func pluginPathWith(home, rel string) string {
+	data, err := os.ReadFile(filepath.Join(home, ".claude", "plugins", "installed_plugins.json"))
+	if err != nil {
+		return ""
+	}
+	var cfg struct {
+		Plugins map[string][]struct {
+			InstallPath string `json:"installPath"`
+		} `json:"plugins"`
+	}
+	if json.Unmarshal(data, &cfg) != nil {
+		return ""
+	}
+	for name, installs := range cfg.Plugins {
+		if !strings.HasPrefix(name, "rmb@") {
+			continue
+		}
+		for _, in := range installs {
+			if in.InstallPath == "" {
+				continue
+			}
+			if _, err := os.Stat(filepath.Join(in.InstallPath, rel)); err == nil {
+				return in.InstallPath
+			}
+		}
+	}
+	return ""
+}
+
 // pluginInstalled reports whether an rmb plugin is installed at all, regardless
 // of what it carries.
 func pluginInstalled(home string) bool {
