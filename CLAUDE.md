@@ -75,6 +75,12 @@ tombstoned in `pruned_sessions` and `ImportFile` skips those ids: deleting a
 session removes the row that records the import, so without it the next sweep
 reads the transcript back in. `remaimber forget <id>` lifts one.
 
+Summarization runs through whichever CLI `REMAIMBER_LLM` names — `claude`
+(default), `codex`, `pi` — or an OpenAI-compatible URL. Each agent CLI is
+invoked ephemerally (`--no-session-persistence`, `--ephemeral`, `--no-session`):
+a persisted summarization session would be imported as a conversation of its
+own, so the archive would fill with its own summaries.
+
 ## Release
 
 ```bash

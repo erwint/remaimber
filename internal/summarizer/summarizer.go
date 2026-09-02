@@ -111,15 +111,19 @@ func parseCap(s string) (head, tail int, ok bool) {
 
 // LoadConfig reads configuration from the environment:
 //
-//	REMAIMBER_LLM           "claude" (default) or an OpenAI-compatible base URL
-//	REMAIMBER_LLM_MODEL     model name (default "haiku" for the claude backend)
+//	REMAIMBER_LLM           the agent CLI to summarize with — "claude" (default),
+//	                        "codex" or "pi" — or an OpenAI-compatible base URL
+//	REMAIMBER_LLM_MODEL     model name (default "haiku" for the claude backend;
+//	                        each other CLI's own default otherwise)
 //	REMAIMBER_LLM_KEY       optional bearer token for the HTTP backend
 //	REMAIMBER_LLM_TIMEOUT   per-call timeout in seconds (default 300)
 //	REMAIMBER_LLM_PRICE     "input,output" USD per million tokens for the HTTP
 //	                        backend (e.g. "0.5,1.5"). Unset means free, which is
 //	                        right for a self-hosted model and wrong for a paid
 //	                        endpoint. The claude backend ignores it — the CLI
-//	                        reports its own cost.
+//	                        reports its own cost. Codex and pi report none, so
+//	                        their calls are counted at zero, as a self-hosted
+//	                        model is.
 //	REMAIMBER_LLM_WINDOW    messages folded per call (default 40)
 //
 // Per-message text budgets, each "head" or "head,tail" in runes (see TextCaps):
@@ -668,7 +672,83 @@ func (c Config) complete(ctx context.Context, system, user string) (string, erro
 	if c.IsHTTP() {
 		return c.completeHTTP(ctx, system, user)
 	}
-	return c.completeClaude(ctx, system, user)
+	switch c.Backend {
+	case "claude", "":
+		return c.completeClaude(ctx, system, user)
+	case "codex":
+		return c.completeCodex(ctx, system, user)
+	case "pi":
+		return c.completePi(ctx, system, user)
+	default:
+		// Falling through to claude would summarize with a CLI the user did not
+		// name, and bill it to them.
+		return "", fmt.Errorf("unknown REMAIMBER_LLM %q: want claude, codex, pi, or a base URL", c.Backend)
+	}
+}
+
+// completeCodex shells out to `codex exec`. --ephemeral keeps the call from
+// leaving a rollout behind: a persisted one would be imported as a conversation
+// of its own, so the archive would fill with its own summarization runs. The
+// answer is written to a file rather than parsed out of the event stream, which
+// carries reasoning and tool traffic as well.
+func (c Config) completeCodex(ctx context.Context, system, user string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.timeout())
+	defer cancel()
+
+	out, err := os.CreateTemp("", "remaimber-codex-*.txt")
+	if err != nil {
+		return "", err
+	}
+	out.Close()
+	defer os.Remove(out.Name())
+
+	args := []string{"exec", "--ephemeral", "--skip-git-repo-check",
+		"--output-last-message", out.Name()}
+	if c.Model != "" {
+		args = append(args, "-m", c.Model)
+	}
+	cmd := exec.CommandContext(ctx, "codex", args...)
+	// Codex has no flag for a system prompt, so it leads the message. The
+	// prompt itself already tells the model the transcript is data.
+	cmd.Stdin = strings.NewReader(system + "\n\n" + user)
+	var errb bytes.Buffer
+	cmd.Stderr = &errb
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("codex summarize: %w: %s", err, truncateErr(errb.String()))
+	}
+
+	answer, err := os.ReadFile(out.Name())
+	if err != nil {
+		return "", fmt.Errorf("codex summarize: %w", err)
+	}
+	// Codex reports no per-call price, so the call is counted and costs nothing
+	// — the same treatment a self-hosted model gets.
+	c.spend(0)
+	return strings.TrimSpace(string(answer)), nil
+}
+
+// completePi shells out to headless pi. --no-session keeps the call ephemeral,
+// for the same reason Codex gets --ephemeral, and -nt removes the tools: a
+// summarization call needs none, and a transcript that asks for one should not
+// find it.
+func (c Config) completePi(ctx context.Context, system, user string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.timeout())
+	defer cancel()
+
+	args := []string{"-p", "--no-session", "--no-tools", "--append-system-prompt", system}
+	if c.Model != "" {
+		args = append(args, "--model", c.Model)
+	}
+	cmd := exec.CommandContext(ctx, "pi", args...)
+	cmd.Stdin = strings.NewReader(user)
+	var outb, errb bytes.Buffer
+	cmd.Stdout = &outb
+	cmd.Stderr = &errb
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("pi summarize: %w: %s", err, truncateErr(errb.String()))
+	}
+	c.spend(0) // pi reports no price; the call is counted, the cost is zero
+	return strings.TrimSpace(outb.String()), nil
 }
 
 // summarizerDeniedTools turns the summarization call into a pure text

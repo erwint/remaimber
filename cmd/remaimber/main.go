@@ -2987,10 +2987,20 @@ func doctorCmd() *cobra.Command {
 						truncate(strings.ReplaceAll(f.Error, "\n", " "), 120))
 				}
 			}
-			if _, err := exec.LookPath("claude"); err != nil {
-				warn("the `claude` CLI is not on PATH; summarization will fail unless REMAIMBER_LLM points elsewhere")
-			} else {
-				ok("summarization backend available")
+			// Which CLI has to be present depends on the configured backend —
+			// checking for `claude` on a machine summarizing through Codex
+			// reports a problem that is not there, and misses the one that is.
+			cfg := summarizer.LoadConfig()
+			switch {
+			case cfg.IsHTTP():
+				ok("summarization backend: %s", cfg.Backend)
+			default:
+				if _, err := exec.LookPath(cfg.Backend); err != nil {
+					warn("the `%s` CLI is not on PATH; summarization will fail unless REMAIMBER_LLM points elsewhere",
+						cfg.Backend)
+				} else {
+					ok("summarization backend available (%s)", cfg.Backend)
+				}
 			}
 
 			fmt.Println("\nIndex")

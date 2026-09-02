@@ -286,14 +286,22 @@ checkpoints *active* sessions - each pass folds in only what was added since the
 last one. A session interrupted by a crash is still recallable from a summary at
 most one interval old.
 
-Both backends run from hooks, including inside a live session:
+`REMAIMBER_LLM` picks who does the summarizing. Any of the three agent CLIs will,
+using the auth it already has, or an OpenAI-compatible endpoint:
 
-- **HTTP backend** (Ollama, LM Studio, …): a plain HTTP call, no constraints.
-- **`claude` backend**: `claude -p --no-session-persistence --model haiku`.
-  `--no-session-persistence` means the call creates no session of its own, so it
-  nests inside a Claude session without firing lifecycle hooks or recursing. It
-  needs the `claude` binary and its auth in the hook's environment; where that is
-  not available (headless, corporate), use the HTTP backend.
+| `REMAIMBER_LLM` | runs | notes |
+|---|---|---|
+| `claude` (default) | `claude -p --no-session-persistence --model haiku` | reports its own cost, so spend is tracked |
+| `codex` | `codex exec --ephemeral --skip-git-repo-check` | answer read from `--output-last-message` |
+| `pi` | `pi -p --no-session --no-tools` | |
+| a base URL | one HTTP call | e.g. `http://localhost:11434/v1` for Ollama |
+
+Each runs from hooks, including inside a live session of the same agent. The
+ephemeral flags matter for more than tidiness: a persisted summarization session
+would be imported as a conversation of its own, so the archive would fill with
+its own summaries. Codex and pi report no price, so their calls are counted at
+zero — the same treatment a self-hosted model gets. Where no CLI auth is
+available (headless, corporate), use the HTTP backend.
 
 A failed summary is recorded on the session and reported by `remaimber doctor`.
 The sweep runs from hooks that discard stderr, so a failure that was only printed
@@ -319,3 +327,7 @@ The archive at `~/.remaimber/remaimber.db` keeps:
 - **Byte-offset tracking**, so an import reads only what is new
 - **One importer at a time** - hooks fire from several agents at once, so importers take a lock and wait briefly instead of contending inside SQLite; one that cannot get in skips, because the running import covers the same files
 - **Cleaned text** - each agent's injected scaffolding is stripped from the search index, so a search matches conversation rather than boilerplate
+
+## License
+
+Apache License 2.0 - see [LICENSE](LICENSE).
