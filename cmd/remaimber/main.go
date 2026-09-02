@@ -1882,7 +1882,7 @@ func verifyCmd() *cobra.Command {
 
 func setupCmd() *cobra.Command {
 	var agent string
-	var dryRun, force bool
+	var dryRun, force, noPlugin bool
 	cmd := &cobra.Command{
 		Use: "setup",
 		Example: `  # Wire up every agent found on this machine
@@ -1890,45 +1890,36 @@ func setupCmd() *cobra.Command {
 
   # Just one of them, or just look
   remaimber setup --agent codex
-  remaimber setup --dry-run`,
+  remaimber setup --dry-run
+
+  # Claude Code without a marketplace plugin
+  remaimber setup --agent claude --no-plugin`,
 		Short: "Wire up every coding agent on this machine",
-		Long: "Wire up every agent found on this machine.\n\n" +
-			"Claude Code's configuration is written directly: import hooks in\n" +
-			"settings.json, and the MCP server registered where Claude Code reads it.\n" +
-			"Codex and pi own a plugin and a package, so setup runs their own install\n" +
-			"commands rather than writing their configuration behind their back.\n\n" +
-			"None of it is required to archive: each plugin carries the same hooks and\n" +
-			"fetches the CLI itself, so installing the plugin from inside an agent is a\n" +
-			"complete alternative to running this.",
+		Long: "Wire up every agent found on this machine, each the same way: by asking it\n" +
+			"to install the plugin — for pi, the package — that carries the import hooks,\n" +
+			"the search tools and the skills.\n\n" +
+			"Claude Code can also be configured without a plugin, with hooks in\n" +
+			"settings.json and an MCP registration: --no-plugin does that. Running both\n" +
+			"routes writes the hooks twice, so setup declines to add them when a plugin\n" +
+			"already provides them.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if agent != "" && agent != importer.AgentClaude &&
 				agent != importer.AgentCodex && agent != importer.AgentPi {
 				return fmt.Errorf("unknown agent %q: want claude, codex or pi", agent)
 			}
-			if agent == "" || agent == importer.AgentClaude {
-				home, _ := homedir.Dir()
-				switch {
-				case !force && setup.PluginProvidesHooks(home):
-					// Writing them here too would fire every event twice.
-					fmt.Println("claude: the rmb plugin already provides the hooks — leaving settings.json alone")
-					fmt.Println("        (--force writes them anyway; --agent codex|pi for the others)")
-					setup.RegisterMCP()
-				case dryRun:
-					fmt.Println("claude: would write hooks to settings.json and register the MCP server")
-				default:
-					if err := setup.Run(); err != nil {
-						return err
-					}
-					setup.RegisterMCP()
-				}
-			}
-			setup.SetupAgents(agent, dryRun)
+			setup.SetupAgents(setup.Options{
+				Only:     agent,
+				DryRun:   dryRun,
+				NoPlugin: noPlugin,
+				Force:    force,
+			})
 			setup.ReportAgents()
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&agent, "agent", "", "Only wire up this agent: claude, codex or pi")
-	cmd.Flags().BoolVar(&force, "force", false, "Write Claude Code's hooks even when the plugin already provides them")
+	cmd.Flags().BoolVar(&noPlugin, "no-plugin", false, "Claude Code: write settings.json hooks instead of installing the plugin")
+	cmd.Flags().BoolVar(&force, "force", false, "With --no-plugin, write the hooks even when the plugin already provides them")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print what would be done, without doing it")
 	return cmd
 }

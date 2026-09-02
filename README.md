@@ -35,21 +35,26 @@ pi install git:github.com/erwint/remaimber
 
 ### From the CLI
 
-Install `remaimber` yourself, then let it wire up every agent on the machine:
+Install `remaimber` yourself and let it install those plugins for you, into
+every agent on the machine:
 
 ```bash
 go install github.com/erwint/remaimber/cmd/remaimber@latest   # needs Go 1.26+
                                                               # or grab a release binary
-remaimber setup              # every agent it finds
-remaimber setup --agent codex --dry-run   # one of them, or just look
+remaimber setup                            # every agent it finds
+remaimber setup --agent codex --dry-run    # one of them, or just look
 ```
 
-`setup` writes Claude Code's configuration itself — hooks in
-`~/.claude/settings.json`, and the MCP server registered with
+Same result as running the commands above by hand — each agent installs its own
+plugin, which is where the hooks and the search tools live. Restart an agent
+after wiring it up.
+
+For Claude Code without a marketplace plugin, `remaimber setup --no-plugin`
+writes hooks to `~/.claude/settings.json` and registers the MCP server with
 `claude mcp add --scope user`, the only place Claude Code reads user-scope
-servers from. For Codex and pi it runs the install commands above, because their
-plugin and package are owned by their own tooling. Restart an agent after wiring
-it up.
+servers from. Use one route or the other: both write the same hooks, and both
+firing means every event runs twice — which is why setup declines to add them
+when a plugin already does.
 
 `remaimber doctor` reports the same picture at any time: which agents are
 installed, which are wired up, and what finishes the job.

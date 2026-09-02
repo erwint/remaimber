@@ -11,15 +11,15 @@ import (
 	"github.com/erwint/remaimber/internal/homedir"
 )
 
-// `remaimber setup` wires up every agent on the machine, each through its own
-// tooling: Claude Code's config is written directly, while Codex and pi are
-// asked to install the plugin and the package they own. Writing their
-// configuration by hand instead would leave a half-installation their own
-// commands do not know about.
+// `remaimber setup` wires up every agent on the machine the same way: by asking
+// that agent to install the plugin (for pi, the package) that carries the hooks,
+// the search tools and the skills. Each agent owns its plugin system, and a
+// plugin already contains everything the integration needs — so there is nothing
+// left for setup to write, only installs to run on the user's behalf.
 //
-// Nothing here is required to archive: an agent's plugin carries the same hooks
-// and fetches the CLI itself, so a plugin install is a complete route on its own
-// and setup is the route for people who installed the CLI first.
+// Claude Code can also be configured directly, with hooks in settings.json and
+// an MCP registration; --no-plugin does that, for anyone who would rather not
+// have a marketplace plugin. Doing both writes the hooks twice.
 
 // AgentStatus is one agent's integration state, as setup can determine it.
 type AgentStatus struct {
@@ -33,15 +33,26 @@ type AgentStatus struct {
 	Next    []string // shown when reporting rather than installing
 }
 
-// SetupAgents wires up each detected agent that is not configured yet. only
-// restricts it to one agent; dryRun prints the commands without running them.
-func SetupAgents(only string, dryRun bool) {
+// Options controls what SetupAgents does.
+type Options struct {
+	Only     string // wire up just this agent
+	DryRun   bool   // print the commands without running them
+	NoPlugin bool   // Claude Code: write settings.json and register MCP instead of installing the plugin
+	Force    bool   // write Claude Code's hooks even when a plugin already provides them
+}
+
+// SetupAgents wires up each detected agent that is not configured yet.
+func SetupAgents(o Options) {
 	home, err := homedir.Dir()
 	if err != nil {
 		return
 	}
-	for _, s := range []AgentStatus{codexStatus(home), piStatus(home)} {
-		if only != "" && only != s.Name {
+	for _, s := range []AgentStatus{claudeStatus(home), codexStatus(home), piStatus(home)} {
+		if s.Name == "claude" && o.NoPlugin {
+			configureClaudeDirectly(home, o)
+			continue
+		}
+		if o.Only != "" && o.Only != s.Name {
 			continue
 		}
 		switch {
@@ -54,7 +65,7 @@ func SetupAgents(only string, dryRun bool) {
 		fmt.Printf("\n%s: installing the %s\n", s.Name, packagingOf(s.Name))
 		for _, argv := range s.Install {
 			fmt.Printf("  $ %s\n", strings.Join(argv, " "))
-			if dryRun {
+			if o.DryRun {
 				continue
 			}
 			cmd := exec.Command(argv[0], argv[1:]...)
@@ -67,10 +78,34 @@ func SetupAgents(only string, dryRun bool) {
 				break
 			}
 		}
-		if s.Note != "" && !dryRun {
+		if s.Note != "" && !o.DryRun {
 			fmt.Printf("  %s\n", s.Note)
 		}
 	}
+}
+
+// configureClaudeDirectly is the plugin-free route: hooks in settings.json and
+// an MCP registration. Refuses to double up on a plugin that already provides
+// the hooks, since both firing means every event runs twice.
+func configureClaudeDirectly(home string, o Options) {
+	if !o.Force && PluginProvidesHooks(home) {
+		fmt.Println("\nclaude: the rmb plugin already provides the hooks — leaving settings.json alone")
+		fmt.Println("        (--force writes them anyway)")
+		if !o.DryRun {
+			RegisterMCP()
+		}
+		return
+	}
+	if o.DryRun {
+		fmt.Println("\nclaude: would write hooks to settings.json and register the MCP server")
+		return
+	}
+	fmt.Println()
+	if err := Run(); err != nil {
+		fmt.Printf("claude: %v\n", err)
+		return
+	}
+	RegisterMCP()
 }
 
 func packagingOf(agent string) string {
@@ -109,12 +144,12 @@ func claudeStatus(home string) AgentStatus {
 	s := AgentStatus{Name: "claude", Installed: dirExists(filepath.Join(home, ".claude"))}
 	inUserConfig, viaPlugin := MCPStatus(home)
 	s.Wired = inUserConfig || viaPlugin
-	s.Next = []string{
-		"remaimber setup",
-		"or install the plugin instead:",
-		"  claude plugin marketplace add erwint/remaimber",
-		"  claude plugin install rmb@remaimber",
+	s.Install = [][]string{
+		{"claude", "plugin", "marketplace", "add", "erwint/remaimber"},
+		{"claude", "plugin", "install", "rmb@remaimber"},
 	}
+	s.Note = "restart Claude Code to load the plugin"
+	s.Next = []string{"remaimber setup --agent claude"}
 	// A plugin installed before the MCP server was bundled provides the commands
 	// and nothing else, and updating it is a different command from installing.
 	if !s.Wired && pluginInstalled(home) {
