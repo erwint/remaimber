@@ -107,6 +107,13 @@ does it otherwise: a plugin updates itself through its marketplace, while its
 install hook only runs when the CLI is *missing*. A binary built from source is
 left alone - it has no release version to compare against.
 
+The version is read from the redirect on the releases page, so only `github.com`
+needs to be reachable and no API quota is spent; the API is a fallback, and
+`GITHUB_TOKEN` raises its limit if you land there. `HTTP_PROXY`, `HTTPS_PROXY`
+and `NO_PROXY` are honoured. When a lookup fails, the error quotes what the
+server said - a bare 403 hides whether it is a rate limit, a proxy denial or a
+moved repository.
+
 ### Where the CLI ends up
 
 On the plugin route, the first session downloads `remaimber` into a directory

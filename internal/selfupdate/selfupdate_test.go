@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -65,6 +66,10 @@ func TestApplyReplacesTheBinary(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.URL.Path == "/"+Repo+"/releases/latest":
+			// How GitHub answers: a redirect to the tag, costing no API quota.
+			w.Header().Set("Location", "/"+Repo+"/releases/tag/v9.9.9")
+			w.WriteHeader(http.StatusFound)
 		case r.URL.Path == "/repos/"+Repo+"/releases/latest":
 			w.Write([]byte(`{"tag_name":"v9.9.9"}`))
 		default:
@@ -117,17 +122,48 @@ func TestApplyReplacesTheBinary(t *testing.T) {
 	}
 }
 
-// A release lookup that fails must return an error rather than a tag, so a
-// throttled caller skips the update instead of trying to download nothing.
-func TestLatestReportsFailure(t *testing.T) {
+// The redirect is tried first, so a machine whose API quota is spent — or whose
+// proxy allows github.com but not api.github.com — still finds the release.
+func TestLatestPrefersTheRedirect(t *testing.T) {
+	apiCalls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "nope", http.StatusInternalServerError)
+		if r.URL.Path == "/"+Repo+"/releases/latest" {
+			w.Header().Set("Location", "https://example.test/"+Repo+"/releases/tag/v1.2.3")
+			w.WriteHeader(http.StatusFound)
+			return
+		}
+		apiCalls++
+		http.Error(w, `{"message":"API rate limit exceeded"}`, http.StatusForbidden)
 	}))
 	defer srv.Close()
-	apiBase = srv.URL
-	defer func() { apiBase = "https://api.github.com" }()
+	apiBase, dlBase = srv.URL, srv.URL
+	defer func() { apiBase, dlBase = "https://api.github.com", "https://github.com" }()
 
-	if tag, err := Latest(context.Background()); err == nil {
-		t.Errorf("Latest() = %q, want an error", tag)
+	tag, err := Latest(context.Background())
+	if err != nil || tag != "v1.2.3" {
+		t.Fatalf("Latest() = %q, %v; want v1.2.3", tag, err)
+	}
+	if apiCalls != 0 {
+		t.Errorf("the API was called %d time(s) when the redirect answered", apiCalls)
+	}
+}
+
+// When both routes fail, the error has to carry what the server said: a bare
+// 403 hides whether it is a rate limit, a proxy denial or a moved repository,
+// and each wants a different fix.
+func TestLatestExplainsFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message":"API rate limit exceeded for 203.0.113.1"}`, http.StatusForbidden)
+	}))
+	defer srv.Close()
+	apiBase, dlBase = srv.URL, srv.URL
+	defer func() { apiBase, dlBase = "https://api.github.com", "https://github.com" }()
+
+	_, err := Latest(context.Background())
+	if err == nil {
+		t.Fatal("want an error when both routes fail")
+	}
+	if !strings.Contains(err.Error(), "rate limit exceeded") {
+		t.Errorf("error = %q, want it to quote what the server said", err)
 	}
 }

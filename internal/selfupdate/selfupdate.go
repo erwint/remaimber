@@ -34,15 +34,80 @@ var (
 )
 
 // httpClient bounds every call: this runs from a hook, where a hang is worse
-// than a missed update.
+// than a missed update. Transport is the default one, which reads HTTP_PROXY,
+// HTTPS_PROXY and NO_PROXY — a machine that reaches GitHub only through a proxy
+// is the normal case in a corporate network, and needs no configuration here.
 var httpClient = &http.Client{Timeout: 30 * time.Second}
 
-// Latest returns the newest published tag, e.g. "v0.8.6".
+// noRedirect resolves the release redirect without following it.
+var noRedirect = &http.Client{
+	Timeout: 30 * time.Second,
+	CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
+
+// userAgent identifies the client. GitHub rejects requests without one, and a
+// filtering proxy is likelier to allow a request that says what it is.
+const userAgent = "remaimber (+https://github.com/" + Repo + ")"
+
+// Latest returns the newest published tag, e.g. "v0.9.1".
+//
+// The tag comes from the redirect on the releases page first, and only then
+// from the API. github.com/…/releases/latest redirects to the tag, which costs
+// no API quota and needs no second host allowed through a proxy — an
+// unauthenticated API call is limited to 60 an hour per address, which several
+// machines behind one NAT can exhaust between them, and the failure looks like
+// a 403 with nothing to explain it.
 func Latest(ctx context.Context) (string, error) {
+	tag, redirectErr := latestFromRedirect(ctx)
+	if redirectErr == nil {
+		return tag, nil
+	}
+	tag, apiErr := latestFromAPI(ctx)
+	if apiErr == nil {
+		return tag, nil
+	}
+	return "", fmt.Errorf("release lookup failed: %v; and via the API: %v", redirectErr, apiErr)
+}
+
+func latestFromRedirect(ctx context.Context) (string, error) {
+	url := fmt.Sprintf("%s/%s/releases/latest", dlBase, Repo)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", userAgent)
+	resp, err := noRedirect.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	loc := resp.Header.Get("Location")
+	if loc == "" {
+		return "", fmt.Errorf("%s: %s%s", url, resp.Status, bodyHint(resp))
+	}
+	tag := loc[strings.LastIndex(loc, "/")+1:]
+	if !strings.HasPrefix(tag, "v") {
+		return "", fmt.Errorf("%s redirected to %q, which is not a tag", url, loc)
+	}
+	return tag, nil
+}
+
+func latestFromAPI(ctx context.Context) (string, error) {
 	url := fmt.Sprintf("%s/repos/%s/releases/latest", apiBase, Repo)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", err
+	}
+	req.Header.Set("User-Agent", userAgent)
+	// A token raises the rate limit from 60 an hour to 5000, and is the usual
+	// way out of a shared-address 403.
+	for _, env := range []string{"GITHUB_TOKEN", "GH_TOKEN"} {
+		if tok := os.Getenv(env); tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
+			break
+		}
 	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -50,7 +115,7 @@ func Latest(ctx context.Context) (string, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("release lookup: %s", resp.Status)
+		return "", fmt.Errorf("%s: %s%s", url, resp.Status, bodyHint(resp))
 	}
 	var release struct {
 		TagName string `json:"tag_name"`
@@ -59,9 +124,21 @@ func Latest(ctx context.Context) (string, error) {
 		return "", err
 	}
 	if release.TagName == "" {
-		return "", fmt.Errorf("release lookup returned no tag")
+		return "", fmt.Errorf("%s returned no tag", url)
 	}
 	return release.TagName, nil
+}
+
+// bodyHint quotes the start of a failed response. A bare status code hides the
+// difference between a rate limit, a proxy denial and a moved repository, all
+// of which arrive as 403 or 404 and want different fixes.
+func bodyHint(resp *http.Response) string {
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 300))
+	if err != nil || len(b) == 0 {
+		return ""
+	}
+	text := strings.Join(strings.Fields(string(b)), " ")
+	return " — " + text
 }
 
 // Newer reports whether latest is a higher version than current. A build with
