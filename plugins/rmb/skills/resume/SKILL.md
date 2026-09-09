@@ -70,9 +70,12 @@ widening the search.
    time span, and summary. If one clearly matches, pick it; otherwise ask.
 3. Decide with the user how to resume:
    - **Partial (usual case):** load the chosen passage's messages, summarize what
-     was done and what's unfinished, `git checkout <branch>` if needed, and
-     continue here. No restart, and it works even when the session came from
-     another agent.
+     was done and what's unfinished, and continue here. No restart, and it works
+     even when the session came from another agent. The branch a session ran on
+     is a fact about the past: check where it stands now (`remaimber resume
+     <session-id>` prints this) before switching. It may be checked out in
+     another worktree, where `git checkout` refuses outright, or already merged
+     here, where switching steps back from the work you have.
    - **Native full resume:** run `remaimber resume <session-id>` and hand the user
      the command it prints. Check the branch first. Note this always resumes the
      *whole* session — partial resume is a way of reading part of it as context,

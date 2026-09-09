@@ -1424,8 +1424,8 @@ func prepareResume(database *sql.DB, prefix, cwd string, gi *gitinfo.Identity) e
 
 	fmt.Printf("Session %s (%s) is ready to resume in this worktree.\n\n",
 		shortID(sessionID), sess.Agent)
-	if sess.GitBranch != "" {
-		fmt.Printf("  Branch at capture: %s   (git checkout %s to match)\n\n", sess.GitBranch, sess.GitBranch)
+	if advice := gitinfo.ResolveBranch(cwd, sess.GitBranch).Advice(); advice != "" {
+		fmt.Printf("  %s\n\n", advice)
 	}
 	fmt.Printf("  Native resume (new process):  %s\n", openCmd)
 	fmt.Printf("  Continue here (no restart):   ask your agent to \"continue session %s\" — it will load the\n", shortID(sessionID))
@@ -2717,8 +2717,11 @@ func runMCP() error {
 		}
 		sess, _ := db.GetSession(database, sessionID)
 		branch := ""
-		if sess != nil && sess.GitBranch != "" {
-			branch = fmt.Sprintf(" Branch at capture: %s (git checkout %s to match).", sess.GitBranch, sess.GitBranch)
+		if sess != nil {
+			here, _ := os.Getwd()
+			if advice := gitinfo.ResolveBranch(here, sess.GitBranch).Advice(); advice != "" {
+				branch = " " + advice
+			}
 		}
 		return mcp.NewToolResultText(fmt.Sprintf(
 			"Linked %s into %s. Resume natively with `claude --resume %s`, or continue here without restart.%s%s",

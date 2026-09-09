@@ -36,7 +36,7 @@ remaimber resume b2bd8168 --since 2026-08-06T11:18 --until 2026-08-06T11:45   # 
    - Nothing specific → run `remaimber resume` (no args) to list this repo's sessions across all worktrees, newest first.
 2. Present the top candidates: session id (first 8 chars), subpath, branch, time span, and summary. If one clearly matches, pick it; otherwise ask.
 3. Decide with the user how to resume:
-   - **Partial (usual case):** load the chosen passage's messages, summarize what was done and what's unfinished, `git checkout <branch>` if needed, and continue here. No restart.
+   - **Partial (usual case):** load the chosen passage's messages, summarize what was done and what's unfinished, and continue here. No restart. The branch a session ran on is a fact about the past: check where it stands now (`remaimber resume <session-id>` prints this) before switching - it may be checked out in another worktree, where `git checkout` refuses outright, or already merged here, where switching steps back from the work you have.
    - **Native full resume:** run `remaimber resume <session-id>` and hand the user the command it prints — `claude --resume <id>` for a Claude Code session (that command links the JSONL under the current cwd's project key first), `codex resume <id>`, or `pi --session <path>`. Check the branch first. Note this always resumes the *whole* session — partial resume is a way of reading part of it as context, not a smaller transcript.
 4. Respect the liveness warning: if `remaimber resume` reports the session looks **live** in another worktree, do NOT resume it — warn that it would corrupt the transcript, and suggest closing that session first.
 
