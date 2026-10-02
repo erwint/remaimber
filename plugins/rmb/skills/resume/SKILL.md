@@ -83,6 +83,10 @@ widening the search.
 4. Respect the liveness warning: if `remaimber resume` reports the session looks
    **live** elsewhere, do NOT resume it — warn that it would corrupt the
    transcript, and suggest closing that session first.
+5. A session with an `origin` (shown as `@name`) was synced from another
+   machine. Read it as context here — partial resume works the same — but it can
+   only be resumed natively on that machine, where its transcript lives; say so
+   rather than offering the command.
 
 ## Notes
 

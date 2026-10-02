@@ -19,6 +19,7 @@ make test     # runs all tests
   `parser.go`/`scanner.go` for Claude Code, `pi.go`, `codex.go`)
 - `internal/homedir/` — home resolution that survives a scrubbed environment
 - `internal/mover/` — move/copy conversations between projects
+- `internal/remote/` — sync with other machines (ssh, S3)
 - `internal/setup/` — Claude Code configuration, and the per-agent status report
 - `internal/types/` — shared type definitions
 
@@ -74,6 +75,19 @@ sweep as the update check, and only when `REMAIMBER_RETENTION` is set. Every rem
 tombstoned in `pruned_sessions` and `ImportFile` skips those ids: deleting a
 session removes the row that records the import, so without it the next sweep
 reads the transcript back in. `remaimber forget <id>` lifts one.
+
+`remaimber sync` (`internal/remote`) pulls other machines' transcripts over ssh
+or from an S3 store, and pushes this machine's to one. It moves transcript files,
+not rows, and imports them with the ordinary importer from a temporary copy, so
+there is no mirror on disk and no second parser. Keys are
+`<agent>/<path under that agent's root>` on every transport
+(`importer.RemoteKey`/`RemoteSessionFile`). Etags live in `remote_objects`,
+recorded only after a successful import or upload so a failure retries. A
+pulled session carries `sessions.origin`; a session belongs to whichever origin
+recorded it first, so a local one is never relabelled, and push sends only the
+local agent directories, so nothing pulled is republished. Both transports
+shell out (`ssh` running a POSIX `sh` script, the `aws` CLI) rather than linking
+clients, so credentials resolve as they do for the user's own tools.
 
 Summarization runs through whichever CLI `REMAIMBER_LLM` names — `claude`
 (default), `codex`, `pi` — or an OpenAI-compatible URL. Each agent CLI is

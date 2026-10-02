@@ -25,6 +25,8 @@ type SessionFile struct {
 	// Agent is the coding agent that wrote the file. Empty means Claude Code,
 	// so rows imported before pi support keep their meaning.
 	Agent string
+	// Origin is the machine the file was synced from, empty for this one.
+	Origin string
 }
 
 // AgentOf returns the file's agent, defaulting to Claude Code.

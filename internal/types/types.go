@@ -21,6 +21,9 @@ type Session struct {
 	// Agent is the coding agent that produced the conversation ("claude", "pi").
 	// Empty on rows imported before multi-agent support, which means Claude Code.
 	Agent string `json:"agent,omitempty"`
+	// Origin names the machine the session was synced from. Empty for one
+	// recorded on this machine, which is the only kind that can be resumed here.
+	Origin string `json:"origin,omitempty"`
 
 	// Rolling summary (Phase 5). SummaryOffset is the message-id high-water mark
 	// the summary reflects. Always emitted (even empty) so consumers get a stable
@@ -88,7 +91,8 @@ type SearchResult struct {
 	SegmentSeq int `json:"segment_seq"`
 	// Agent is the coding agent the conversation came from; how it is resumed
 	// depends on it.
-	Agent string `json:"agent,omitempty"`
+	Agent  string `json:"agent,omitempty"` // Origin is the machine the session was synced from, empty for this one.
+	Origin string `json:"origin,omitempty"`
 }
 
 // JSONLLine represents a raw parsed JSONL line from a conversation file.

@@ -13,8 +13,8 @@ func UpsertSession(tx *sql.Tx, s *types.Session) error {
 	_, err := tx.Exec(`
 		INSERT INTO sessions (session_id, project_key, project_path, custom_title, first_prompt,
 			git_branch, cwd, started_at, ended_at, message_count, file_mtime, file_size, last_byte_offset,
-			agent)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			agent, origin)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(session_id) DO UPDATE SET
 			project_key = excluded.project_key,
 			project_path = excluded.project_path,
@@ -28,10 +28,11 @@ func UpsertSession(tx *sql.Tx, s *types.Session) error {
 			file_mtime = excluded.file_mtime,
 			file_size = excluded.file_size,
 			last_byte_offset = excluded.last_byte_offset,
-			agent = COALESCE(excluded.agent, sessions.agent)`,
+			agent = COALESCE(excluded.agent, sessions.agent),
+			origin = COALESCE(excluded.origin, sessions.origin)`,
 		s.SessionID, s.ProjectKey, s.ProjectPath, nullStr(s.CustomTitle), nullStr(s.FirstPrompt),
 		nullStr(s.GitBranch), nullStr(s.CWD), nullStr(s.StartedAt), nullStr(s.EndedAt),
-		s.MessageCount, s.FileMtime, s.FileSize, s.LastByteOffset, nullStr(s.Agent),
+		s.MessageCount, s.FileMtime, s.FileSize, s.LastByteOffset, nullStr(s.Agent), nullStr(s.Origin),
 	)
 	return err
 }
@@ -84,6 +85,10 @@ const salientMessages = `role IN ('user','assistant')
 // comparison has to normalise rather than read the column directly.
 const agentIs = `COALESCE(NULLIF(s.agent,''),'claude') = ?`
 
+// originIs matches the machine a session came from. "local" names this one,
+// whose rows carry no origin.
+const originIs = `COALESCE(NULLIF(s.origin,''),'local') = ?`
+
 // GetSessionMeta retrieves file tracking metadata for a session.
 func GetSessionMeta(db *sql.DB, sessionID string) (mtime float64, size int64, offset int64, found bool, err error) {
 	err = db.QueryRow(`SELECT file_mtime, file_size, last_byte_offset FROM sessions WHERE session_id = ?`, sessionID).
@@ -103,6 +108,7 @@ type ListFilter struct {
 	Repo    string // exact match on session_identity.repo_id (cross-worktree)
 	Subpath string // exact match on session_identity.subpath
 	Agent   string // exact match on the originating agent ("claude", "codex", "pi")
+	Origin  string // machine a session was synced from; "local" for this one
 	Since   string // ISO timestamp
 	Until   string // ISO timestamp
 	Limit   int
@@ -116,14 +122,14 @@ const sessionColumns = `s.session_id, s.project_key, s.project_path, COALESCE(s.
 	COALESCE(s.started_at,''), COALESCE(s.ended_at,''), s.message_count, COALESCE(s.summary,''),
 	COALESCE(s.summary_offset,0),
 	COALESCE(si.repo_id,''), COALESCE(si.subpath,''), COALESCE(si.worktree_root,''), COALESCE(si.cwd,''),
-	COALESCE(NULLIF(s.agent,''),'claude')`
+	COALESCE(NULLIF(s.agent,''),'claude'), COALESCE(s.origin,'')`
 
 // scanSession scans a row produced by sessionColumns.
 func scanSession(scan func(...any) error) (types.Session, error) {
 	var s types.Session
 	err := scan(&s.SessionID, &s.ProjectKey, &s.ProjectPath, &s.CustomTitle, &s.FirstPrompt,
 		&s.GitBranch, &s.CWD, &s.StartedAt, &s.EndedAt, &s.MessageCount, &s.Summary,
-		&s.SummaryOffset, &s.RepoID, &s.Subpath, &s.WorktreeRoot, &s.IdentityCWD, &s.Agent)
+		&s.SummaryOffset, &s.RepoID, &s.Subpath, &s.WorktreeRoot, &s.IdentityCWD, &s.Agent, &s.Origin)
 	return s, err
 }
 
@@ -147,6 +153,10 @@ func ListSessions(db *sql.DB, f ListFilter) ([]types.Session, error) {
 	if f.Agent != "" {
 		query += ` AND ` + agentIs
 		args = append(args, f.Agent)
+	}
+	if f.Origin != "" {
+		query += ` AND ` + originIs
+		args = append(args, f.Origin)
 	}
 	if f.Since != "" {
 		query += ` AND s.ended_at >= ?`
@@ -191,6 +201,7 @@ type SearchFilter struct {
 	Limit          int
 	ExcludeSession string // exclude this session ID from results
 	Agent          string // exact match on the originating agent ("claude", "codex", "pi")
+	Origin         string // machine a session was synced from; "local" for this one
 	// IncludeToolOutput brings tool-result turns back into the results. They are
 	// dropped by default: they are the bulk of an agentic transcript, and they
 	// include this tool's own archived output, so a search for a term can
@@ -250,7 +261,7 @@ func searchMessages(db *sql.DB, f SearchFilter, match string) ([]types.SearchRes
 			snippet(messages_fts, 0, '>>>', '<<<', '...', 40),
 			COALESCE(m.timestamp,''), m.type, COALESCE(m.role,''),
 			COALESCE(s.summary,''), COALESCE(si.repo_id,''), COALESCE(si.cwd, s.cwd, ''),
-			COALESCE(g.seq, -1), COALESCE(NULLIF(s.agent,''),'claude')
+			COALESCE(g.seq, -1), COALESCE(NULLIF(s.agent,''),'claude'), COALESCE(s.origin,'')
 		FROM messages_fts
 		JOIN messages m ON m.id = messages_fts.rowid
 		JOIN sessions s ON s.session_id = m.session_id
@@ -269,6 +280,10 @@ func searchMessages(db *sql.DB, f SearchFilter, match string) ([]types.SearchRes
 	if f.Agent != "" {
 		q += ` AND ` + agentIs
 		args = append(args, f.Agent)
+	}
+	if f.Origin != "" {
+		q += ` AND ` + originIs
+		args = append(args, f.Origin)
 	}
 	if f.Project != "" {
 		q += ` AND s.project_key LIKE ?`
@@ -311,7 +326,7 @@ func searchMessages(db *sql.DB, f SearchFilter, match string) ([]types.SearchRes
 		var r types.SearchResult
 		if err := rows.Scan(&r.SessionID, &r.ProjectKey, &r.CustomTitle,
 			&r.Snippet, &r.Timestamp, &r.Type, &r.Role,
-			&r.Summary, &r.RepoID, &r.CWD, &r.SegmentSeq, &r.Agent); err != nil {
+			&r.Summary, &r.RepoID, &r.CWD, &r.SegmentSeq, &r.Agent, &r.Origin); err != nil {
 			return nil, err
 		}
 		results = append(results, r)

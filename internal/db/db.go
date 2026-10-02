@@ -23,6 +23,21 @@ CREATE TABLE IF NOT EXISTS pruned_sessions (
 	reason     TEXT
 );
 
+-- What sync has seen of another machine's transcripts. A pull compares each
+-- listed object's etag with the one recorded here and fetches only what changed;
+-- a push records the local file's etag so an unchanged transcript is not sent
+-- again. Keyed by origin, so two machines' identical paths never collide.
+CREATE TABLE IF NOT EXISTS remote_objects (
+	origin     TEXT NOT NULL,
+	direction  TEXT NOT NULL,       -- 'pull' | 'push'
+	key        TEXT NOT NULL,       -- <agent>/<path under that agent's root>
+	etag       TEXT NOT NULL,
+	size       INTEGER,
+	source     TEXT,                -- the location it was synced with, for display
+	synced_at  TEXT,
+	PRIMARY KEY (origin, direction, key)
+);
+
 CREATE TABLE IF NOT EXISTS sessions (
 	session_id      TEXT PRIMARY KEY,
 	project_key     TEXT NOT NULL,
@@ -162,6 +177,9 @@ var migrations = []string{
 	// so rows imported before multi-agent support keep their meaning without a
 	// backfill.
 	`ALTER TABLE sessions ADD COLUMN agent TEXT`,
+	// The machine a session was pulled from; NULL for one recorded here. It is
+	// what keeps another machine's conversations from passing for this one's.
+	`ALTER TABLE sessions ADD COLUMN origin TEXT`,
 }
 
 // postMigrations run after the column migrations, once the columns exist.

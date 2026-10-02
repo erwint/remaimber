@@ -66,6 +66,7 @@ installed, which are wired up, and what finishes the job.
 | Codex | **0.148.0+** - asynchronous command hooks. Older versions log `skipping async hooks, not supported yet` and run only the synchronous ones, so the archive is still written before a compaction but background maintenance never fires |
 | pi | 0.84+ |
 | Go | 1.26+, to build from source |
+| ssh / AWS CLI | only for `remaimber sync`: ssh that logs in without a prompt, or `aws` for an S3 store |
 
 Nothing above is required to archive: `remaimber import` reads every agent's
 transcripts off disk on its own. Wiring an agent up adds what a periodic import
@@ -186,6 +187,12 @@ remaimber stats
 remaimber update
 remaimber update --check
 
+# Bring in other machines' conversations (see "Syncing between machines")
+remaimber sync pull ssh://build@mac-mini.local --origin mac-mini
+remaimber sync push s3://team-bucket/remaimber
+remaimber sync pull s3://team-bucket/remaimber --origin laptop
+remaimber list --origin mac-mini                # one machine's sessions; "local" for this one's
+
 # Bound the archive's size (nothing is dropped unless you ask)
 remaimber prune --older-than 180d --dry-run
 remaimber prune --older-than 180d --vacuum
@@ -267,6 +274,54 @@ resuming a live transcript corrupts it. Liveness is judged by the transcript's
 modification time rather than a clean `SessionEnd`, so a killed session ages out
 by itself.
 
+## Syncing between machines
+
+`remaimber sync` brings conversations from other machines into this archive, so
+search and recall cover work done anywhere. What moves is the agents' own
+transcript files, not database rows: each pulled file is imported by the same
+rules as a local one.
+
+**Over ssh**, `pull` reads the other machine's agent directories directly.
+Nothing needs installing there, but ssh must log in without a prompt (a key or
+an agent); a host that would ask for a password fails at once.
+
+```bash
+remaimber sync pull ssh://build@mac-mini.local --origin mac-mini
+remaimber sync pull ssh://nas/~/backups/laptop-home --origin laptop     # a copied home
+remaimber sync pull ssh://box/srv/codex/sessions --agent codex --origin box
+```
+
+The path is a home directory holding `.claude/projects`, `.codex/sessions` and
+`.pi/agent/sessions` (default: the remote home). With `--agent` it is that one
+agent's session directory, for one kept somewhere else.
+
+**Through S3**, the bucket is a store between machines: each one pushes its own
+transcripts under `<prefix>/<origin>/`, and the others pull from there. Transfers
+go through the AWS CLI, so credentials resolve as they do for `aws s3 ls`:
+`--aws-profile`, else `AWS_PROFILE`, else the default chain.
+
+```bash
+remaimber sync push s3://team-bucket/remaimber                    # as this hostname
+remaimber sync pull s3://team-bucket/remaimber --origin laptop --aws-profile work
+```
+
+A pull always needs `--origin`, naming the machine the sessions came from. They
+show as `@origin` in `list` and `search`, and `--origin` filters by it (`local`
+for this machine's own). A session already in the archive - recorded here, or
+pulled under another name - is left as it is, so two machines syncing through
+one store never trade their own conversations back and forth.
+
+Each object's etag is recorded, so a repeat sync transfers only what changed:
+the S3 ETag, or size and modification time over ssh. `--force` ignores them,
+`--dry-run` shows what would move, and `remaimber sync status` lists every
+origin with its last sync.
+
+A push sends only this machine's own transcripts - never what it pulled - and
+holds back any session pruned or forgotten here. A pulled session can be read
+here (`remaimber resume <id> --match ...`, `get_segments`) but resumed only on
+its own machine, where its transcript lives. Pulled sessions join the summary
+backlog like local ones, a few at a time.
+
 ## Configuration
 
 | Env var | Default | Purpose |
@@ -307,7 +362,7 @@ Each runs from hooks, including inside a live session of the same agent. The
 ephemeral flags matter for more than tidiness: a persisted summarization session
 would be imported as a conversation of its own, so the archive would fill with
 its own summaries. Codex and pi report no price, so their calls are counted at
-zero — the same treatment a self-hosted model gets. Where no CLI auth is
+zero - the same treatment a self-hosted model gets. Where no CLI auth is
 available (headless, corporate), use the HTTP backend.
 
 A failed summary is recorded on the session and reported by `remaimber doctor`.

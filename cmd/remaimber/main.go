@@ -97,6 +97,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(recallCmd())
 	root.AddCommand(verifyCmd())
 	root.AddCommand(setupCmd())
+	root.AddCommand(syncCmd())
 	root.AddGroup(
 		&cobra.Group{ID: "find", Title: "Finding past work:"},
 		&cobra.Group{ID: "keep", Title: "Keeping the archive:"},
@@ -118,7 +119,7 @@ func newRootCmd() *cobra.Command {
 		"search": "find", "recall": "find", "resume": "find", "list": "find",
 		"show": "find", "summary": "find", "export": "find",
 
-		"import": "keep", "summarize": "keep", "setup": "keep",
+		"import": "keep", "sync": "keep", "summarize": "keep", "setup": "keep",
 		"doctor": "keep", "stats": "keep", "update": "keep", "cost": "keep",
 
 		"prune": "maintain", "forget": "maintain", "verify": "maintain", "delete": "maintain",
@@ -519,7 +520,7 @@ func backfillIdentityCmd() *cobra.Command {
 }
 
 func listCmd() *cobra.Command {
-	var project, repo, subpath, since, until, agent string
+	var project, repo, subpath, since, until, agent, origin string
 	var limit int
 	var jsonOut bool
 	cmd := &cobra.Command{
@@ -558,6 +559,7 @@ func listCmd() *cobra.Command {
 				Repo:    repo,
 				Subpath: subpath,
 				Agent:   agent,
+				Origin:  origin,
 				Since:   since,
 				Until:   until,
 				Limit:   limit,
@@ -589,6 +591,9 @@ func listCmd() *cobra.Command {
 				if s.Agent != "" && s.Agent != importer.AgentClaude {
 					project += " " + s.Agent
 				}
+				if s.Origin != "" {
+					project += " @" + s.Origin
+				}
 				fmt.Printf("%s %-36s  %-20s  %s  [%d msgs]\n",
 					resumable, s.SessionID, project, label, s.MessageCount)
 				if loc := sessionLocation(s); loc != "" {
@@ -612,6 +617,7 @@ func listCmd() *cobra.Command {
 	cmd.Flags().IntVar(&limit, "limit", 20, "Max results")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output as JSON")
 	cmd.Flags().StringVar(&agent, "agent", "", agentFlagHelp)
+	cmd.Flags().StringVar(&origin, "origin", "", originFlagHelp)
 	return cmd
 }
 
@@ -637,7 +643,7 @@ func sessionLocation(s types.Session) string {
 }
 
 func searchCmd() *cobra.Command {
-	var project, repo, subpath, role, since, until, excludeSession, agent string
+	var project, repo, subpath, role, since, until, excludeSession, agent, origin string
 	var limit int
 	var jsonOut, includeToolOutput bool
 	cmd := &cobra.Command{
@@ -686,6 +692,7 @@ func searchCmd() *cobra.Command {
 			results, err := db.SearchMessages(database, db.SearchFilter{
 				Query:             query,
 				Agent:             agent,
+				Origin:            origin,
 				Project:           project,
 				Repo:              repo,
 				Subpath:           subpath,
@@ -725,6 +732,9 @@ func searchCmd() *cobra.Command {
 				if r.Agent != "" && r.Agent != importer.AgentClaude {
 					agent = " " + r.Agent
 				}
+				if r.Origin != "" {
+					agent += " @" + r.Origin
+				}
 				fmt.Printf("%s %s%s%s [%s] %s (%s)\n  %s\n\n",
 					resumable, shortID(r.SessionID), agent, seg, r.Timestamp, title, r.Role, r.Snippet)
 			}
@@ -747,6 +757,7 @@ func searchCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output as JSON")
 	cmd.Flags().StringVar(&excludeSession, "exclude-session", "", "Exclude this session ID from results")
 	cmd.Flags().StringVar(&agent, "agent", "", agentFlagHelp)
+	cmd.Flags().StringVar(&origin, "origin", "", originFlagHelp)
 	return cmd
 }
 
@@ -1123,7 +1134,7 @@ func partialResume(database *sql.DB, prefix, cwd string, gi *gitinfo.Identity,
 	}
 
 	sess, _ := db.GetSession(database, sessionID)
-	openCmd, err := prepareForResume(sess, cwd)
+	openCmd, err := fullResumeHint(sess, cwd)
 	if err != nil {
 		return err
 	}
@@ -1183,12 +1194,29 @@ func partialResume(database *sql.DB, prefix, cwd string, gi *gitinfo.Identity,
 	return nil
 }
 
+// fullResumeHint is the "or open the whole thing" line under a partial resume.
+// A session synced from another machine cannot be opened here, but the part
+// asked for is in the archive, so that is a note rather than a failure.
+func fullResumeHint(sess *types.Session, cwd string) (string, error) {
+	if sess != nil && sess.Origin != "" {
+		return "on " + sess.Origin + " only - synced from there, so its transcript is not on this machine", nil
+	}
+	return prepareForResume(sess, cwd)
+}
+
 // prepareForResume makes a session openable from the current worktree and returns
 // the command that opens it. Claude Code resolves a session by id within the
 // project directory matching the cwd, so its file has to be linked under the
 // current carrier key; pi's --session takes an absolute path, so nothing needs
 // moving and the path is the whole answer.
 func prepareForResume(sess *types.Session, cwd string) (openCmd string, err error) {
+	if sess != nil && sess.Origin != "" {
+		// Its transcript lives on that machine; the archive holds what was said,
+		// which reading as context does not need the file for.
+		return "", fmt.Errorf("session %s was synced from %s, so its transcript is not on this machine to resume; "+
+			"read the part you need here instead (remaimber resume %s --match <topic> --print), or resume it on %s",
+			shortID(sess.SessionID), sess.Origin, shortID(sess.SessionID), sess.Origin)
+	}
 	if sess != nil && sess.Agent == importer.AgentPi {
 		path := importer.PiSessionPath(sess.ProjectKey, sess.SessionID)
 		if path == "" {
@@ -1315,7 +1343,7 @@ func passageResume(database *sql.DB, sessionID, cwd string, all []db.Segment, ma
 	}
 
 	sess, _ := db.GetSession(database, sessionID)
-	openCmd, err := prepareForResume(sess, cwd)
+	openCmd, err := fullResumeHint(sess, cwd)
 	if err != nil {
 		return err
 	}
@@ -2692,6 +2720,12 @@ func runMCP() error {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
+		if origin, _ := db.SessionOrigin(database, sessionID); origin != "" {
+			return mcp.NewToolResultError(fmt.Sprintf(
+				"session %s was synced from %s; its transcript is not on this machine, so it cannot be linked "+
+					"for a native resume. Load the part you need with get_segments instead.", sessionID, origin)), nil
+		}
+
 		targetProject := req.GetString("target_project", "")
 		if targetProject == "" {
 			cwd, err := os.Getwd()
@@ -3003,6 +3037,24 @@ func doctorCmd() *cobra.Command {
 						cfg.Backend)
 				} else {
 					ok("summarization backend available (%s)", cfg.Backend)
+				}
+			}
+
+			// Shown only once something has been synced: on a single machine a
+			// "Sync" heading with nothing under it is noise.
+			if synced, err := db.SyncStatus(database); err == nil && len(synced) > 0 {
+				fmt.Println("\nSync")
+				needsAWS := false
+				for _, st := range synced {
+					if st.Direction == db.SyncPull {
+						ok("pulled %d session(s) from %s, last %s (%s)", st.Sessions, st.Origin, st.LastSync, st.Source)
+					} else {
+						ok("pushed %d transcript(s) as %s, last %s (%s)", st.Objects, st.Origin, st.LastSync, st.Source)
+					}
+					needsAWS = needsAWS || strings.HasPrefix(st.Source, "s3://")
+				}
+				if _, err := exec.LookPath("aws"); needsAWS && err != nil {
+					warn("the AWS CLI (aws) is not on PATH; s3:// sync uses it and will fail")
 				}
 			}
 

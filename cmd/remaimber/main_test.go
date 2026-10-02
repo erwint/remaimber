@@ -32,32 +32,38 @@ func TestEveryCommandHasAnExample(t *testing.T) {
 }
 
 // An example that names a flag the command does not define is worse than none:
-// it fails the moment someone copies it.
+// it fails the moment someone copies it. Each line is checked against the
+// command it actually runs, so a parent's examples of its subcommands (sync
+// pull, sync push) are held to those subcommands' flags.
 func TestExamplesOnlyUseRealFlags(t *testing.T) {
+	root := newRootCmd()
 	var walk func(*cobra.Command)
 	walk = func(c *cobra.Command) {
-		for _, sub := range c.Commands() {
-			for _, line := range strings.Split(sub.Example, "\n") {
-				line = strings.TrimSpace(line)
-				if !strings.HasPrefix(line, "remaimber "+sub.Name()) {
+		for _, line := range strings.Split(c.Example, "\n") {
+			fields := strings.Fields(strings.TrimSpace(line))
+			if len(fields) < 2 || fields[0] != "remaimber" {
+				continue
+			}
+			target, _, err := root.Find(fields[1:])
+			if err != nil || target == root {
+				continue
+			}
+			for _, tok := range fields {
+				if !strings.HasPrefix(tok, "--") {
 					continue
 				}
-				for _, tok := range strings.Fields(line) {
-					if !strings.HasPrefix(tok, "--") {
-						continue
-					}
-					name := strings.TrimPrefix(strings.SplitN(tok, "=", 2)[0], "--")
-					if name == "" {
-						continue
-					}
-					if sub.Flags().Lookup(name) == nil && sub.InheritedFlags().Lookup(name) == nil &&
-						c.PersistentFlags().Lookup(name) == nil {
-						t.Errorf("%s: example uses undefined flag --%s\n  %s", sub.CommandPath(), name, line)
-					}
+				name := strings.TrimPrefix(strings.SplitN(tok, "=", 2)[0], "--")
+				if name == "" {
+					continue
+				}
+				if target.Flags().Lookup(name) == nil && target.InheritedFlags().Lookup(name) == nil {
+					t.Errorf("%s: example uses undefined flag --%s\n  %s", target.CommandPath(), name, line)
 				}
 			}
+		}
+		for _, sub := range c.Commands() {
 			walk(sub)
 		}
 	}
-	walk(newRootCmd())
+	walk(root)
 }

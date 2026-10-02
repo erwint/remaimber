@@ -1,0 +1,396 @@
+package remote
+
+import (
+	"bytes"
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/erwint/remaimber/internal/db"
+)
+
+func TestParse(t *testing.T) {
+	cases := []struct {
+		in                         string
+		scheme, host, port, prefix string
+	}{
+		{"ssh://build@mac-mini.local", "ssh", "build@mac-mini.local", "", ""},
+		{"ssh://mac-mini/", "ssh", "mac-mini", "", ""},
+		{"ssh://nas:2222/~/backups/laptop", "ssh", "nas", "2222", "~/backups/laptop"},
+		{"ssh://box/srv/codex/sessions/", "ssh", "box", "", "/srv/codex/sessions"},
+		{"s3://team-bucket", "s3", "team-bucket", "", ""},
+		{"s3://team-bucket/remaimber/", "s3", "team-bucket", "", "remaimber"},
+	}
+	for _, c := range cases {
+		loc, err := Parse(c.in)
+		if err != nil {
+			t.Errorf("Parse(%q): %v", c.in, err)
+			continue
+		}
+		if loc.Scheme != c.scheme || loc.Host != c.host || loc.Port != c.port || loc.Prefix != c.prefix {
+			t.Errorf("Parse(%q) = %+v", c.in, *loc)
+		}
+	}
+	for _, bad := range []string{"mac-mini:/x", "/local/path", "https://example.com/x", "s3://"} {
+		if _, err := Parse(bad); err == nil {
+			t.Errorf("Parse(%q) accepted a location it cannot sync with", bad)
+		}
+	}
+}
+
+func TestValidOrigin(t *testing.T) {
+	for _, ok := range []string{"mac-mini", "laptop", "build.box_2"} {
+		if err := ValidOrigin(ok); err != nil {
+			t.Errorf("ValidOrigin(%q): %v", ok, err)
+		}
+	}
+	// Required, never this machine's own label, and safe as a path segment.
+	for _, bad := range []string{"", "local", "LOCAL", "a/b", "../x", "-x", "has space"} {
+		if ValidOrigin(bad) == nil {
+			t.Errorf("ValidOrigin(%q) accepted it", bad)
+		}
+	}
+}
+
+// fakeHome lays out the three agents' directories as a machine has them.
+func fakeHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	write := func(rel, content string) {
+		p := filepath.Join(home, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(".claude/projects/-Users-x-proj/aaaaaaaa-0000-0000-0000-000000000001.jsonl", claudeLines("aaaaaaaa-0000-0000-0000-000000000001", 2))
+	// A subagent transcript sits deeper and is not a session of its own.
+	write(".claude/projects/-Users-x-proj/aaaaaaaa-0000-0000-0000-000000000001/subagents/agent-1.jsonl", "{}\n")
+	write(".codex/sessions/2026/09/03/rollout-2026-09-03T10-00-00-bbbbbbbb-0000-0000-0000-000000000002.jsonl", "{}\n")
+	write(".pi/agent/sessions/--Users-x-proj--/2026-09-03T10-00-00-000Z_cccccccc-0000-0000-0000-000000000003.jsonl", "{}\n")
+	write(".claude/projects/-Users-x-proj/notes.txt", "not a transcript")
+	return home
+}
+
+func claudeLines(id string, n int) string {
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		fmt.Fprintf(&b, `{"type":"user","uuid":"%s-%d","timestamp":"2026-09-03T10:00:%02dZ","message":{"role":"user","content":"line %d"},"sessionId":"%s","cwd":"/Users/x/proj"}`+"\n",
+			id, i, i, i, id)
+	}
+	return b.String()
+}
+
+// localSSH runs an ssh source's scripts with sh on this machine, with HOME
+// pointed at a fake home — the same script the remote would run.
+func localSSH(t *testing.T, home string, loc string, agent string) *sshSource {
+	t.Helper()
+	l, err := Parse(loc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := newSSH(l, Options{Agent: agent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.run = func(ctx context.Context, script string, w io.Writer) error {
+		cmd := exec.CommandContext(ctx, "sh", "-c", script)
+		cmd.Env = append(os.Environ(), "HOME="+home)
+		cmd.Stdout = w
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("%w: %s", err, stderr.String())
+		}
+		return nil
+	}
+	return s
+}
+
+func TestSSHListsEveryAgentFromTheHome(t *testing.T) {
+	home := fakeHome(t)
+	src := localSSH(t, home, "ssh://box", "")
+	objs, err := src.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]Object{}
+	for _, o := range objs {
+		got[o.Key] = o
+	}
+	want := []string{
+		"claude/-Users-x-proj/aaaaaaaa-0000-0000-0000-000000000001.jsonl",
+		"codex/2026/09/03/rollout-2026-09-03T10-00-00-bbbbbbbb-0000-0000-0000-000000000002.jsonl",
+		"pi/--Users-x-proj--/2026-09-03T10-00-00-000Z_cccccccc-0000-0000-0000-000000000003.jsonl",
+	}
+	if len(objs) != len(want) {
+		t.Errorf("listed %d objects, want %d: %v", len(objs), len(want), objs)
+	}
+	for _, k := range want {
+		o, ok := got[k]
+		if !ok {
+			t.Errorf("missing %s", k)
+			continue
+		}
+		if o.Size == 0 || !strings.Contains(o.ETag, "-") {
+			t.Errorf("%s: size %d etag %q, want size and a size-mtime etag", k, o.Size, o.ETag)
+		}
+	}
+
+	// And fetching returns the file's bytes.
+	var buf bytes.Buffer
+	key := want[0]
+	if err := src.Fetch(context.Background(), key, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), `"line 1"`) {
+		t.Errorf("fetched %q", buf.String())
+	}
+}
+
+// A path with --agent is that agent's directory, wherever it is kept.
+func TestSSHPathWithAgent(t *testing.T) {
+	home := fakeHome(t)
+	src := localSSH(t, home, "ssh://box/"+filepath.Join(home, ".codex", "sessions"), "codex")
+	objs, err := src.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(objs) != 1 || !strings.HasPrefix(objs[0].Key, "codex/2026/") {
+		t.Errorf("objs = %v, want the one codex rollout keyed under codex/", objs)
+	}
+}
+
+// A home without any agent directories is an empty machine, not an error.
+func TestSSHEmptyHome(t *testing.T) {
+	src := localSSH(t, t.TempDir(), "ssh://box", "")
+	objs, err := src.List(context.Background())
+	if err != nil || len(objs) != 0 {
+		t.Errorf("List = %v, %v; want nothing and no error", objs, err)
+	}
+}
+
+func TestParseS3Listing(t *testing.T) {
+	data := []byte(`[
+		{"Key": "rmb/laptop/claude/-p/x.jsonl", "Size": 12, "ETag": "\"abc123\""},
+		{"Key": "rmb/laptop/claude/-p/readme.txt", "Size": 3, "ETag": "\"zzz\""}
+	]`)
+	objs, err := parseS3Listing(data, "rmb/laptop/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(objs) != 1 || objs[0].Key != "claude/-p/x.jsonl" || objs[0].ETag != "abc123" || objs[0].Size != 12 {
+		t.Errorf("objs = %+v, want the transcript with its key relative to the origin and its etag unquoted", objs)
+	}
+	// The CLI prints null for a prefix with nothing under it.
+	if objs, err := parseS3Listing([]byte("null\n"), "x/"); err != nil || len(objs) != 0 {
+		t.Errorf("null listing = %v, %v", objs, err)
+	}
+}
+
+// The store keeps each machine under its own name, below the prefix.
+func TestS3KeysSitUnderTheOrigin(t *testing.T) {
+	loc, _ := Parse("s3://bucket/rmb")
+	s, err := newS3(loc, Options{Origin: "laptop"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls [][]string
+	s.run = func(ctx context.Context, args []string, stdin io.Reader, w io.Writer) error {
+		calls = append(calls, args)
+		return nil
+	}
+	s.Put(context.Background(), "claude/-p/x.jsonl", "/tmp/x.jsonl")
+	got := strings.Join(calls[0], " ")
+	if !strings.Contains(got, "s3://bucket/rmb/laptop/claude/-p/x.jsonl") {
+		t.Errorf("put ran %q", got)
+	}
+	if _, err := newS3(loc, Options{}); err == nil {
+		t.Error("an S3 store without an origin has nowhere to put anything")
+	}
+}
+
+// fakeSource serves transcripts from memory and counts fetches.
+type fakeSource struct {
+	files   map[string]string
+	etags   map[string]string
+	fetched []string
+	failOn  string
+}
+
+func (f *fakeSource) List(context.Context) ([]Object, error) {
+	var out []Object
+	for k, v := range f.files {
+		out = append(out, Object{Key: k, ETag: f.etags[k], Size: int64(len(v))})
+	}
+	return out, nil
+}
+
+func (f *fakeSource) Fetch(_ context.Context, key string, w io.Writer) error {
+	if key == f.failOn {
+		return errors.New("connection reset")
+	}
+	f.fetched = append(f.fetched, key)
+	_, err := io.WriteString(w, f.files[key])
+	return err
+}
+
+func testDB(t *testing.T) *sql.DB {
+	t.Helper()
+	database, err := db.OpenAt(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	return database
+}
+
+func lockDir(t *testing.T) {
+	t.Helper()
+	// The import lock lives in the state directory, under HOME.
+	t.Setenv("HOME", t.TempDir())
+}
+
+const idA = "aaaaaaaa-0000-0000-0000-00000000000a"
+
+func TestPullFetchesOnlyWhatChanged(t *testing.T) {
+	lockDir(t)
+	database := testDB(t)
+	key := "claude/-Users-x-proj/" + idA + ".jsonl"
+	src := &fakeSource{
+		files: map[string]string{key: claudeLines(idA, 2)},
+		etags: map[string]string{key: "v1"},
+	}
+	opts := PullOptions{Origin: "mac-mini", Source: "ssh://mac-mini"}
+
+	st, err := Pull(context.Background(), database, src, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Fetched != 1 || st.Imported != 1 {
+		t.Fatalf("first pull = %+v, want one fetched and imported", st)
+	}
+	if origin, ok := db.SessionOrigin(database, idA); !ok || origin != "mac-mini" {
+		t.Errorf("session origin = %q, %v; want mac-mini", origin, ok)
+	}
+
+	// Same etag: nothing is fetched.
+	st, err = Pull(context.Background(), database, src, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Unchanged != 1 || st.Fetched != 0 || len(src.fetched) != 1 {
+		t.Errorf("second pull = %+v after %d fetch(es), want it unchanged and not fetched", st, len(src.fetched))
+	}
+
+	// The transcript grew: fetched again, and only the new line is new.
+	src.files[key] = claudeLines(idA, 3)
+	src.etags[key] = "v2"
+	if _, err := Pull(context.Background(), database, src, opts); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	database.QueryRow(`SELECT COUNT(*) FROM messages WHERE session_id = ?`, idA).Scan(&n)
+	if n != 3 || len(src.fetched) != 2 {
+		t.Errorf("%d messages after %d fetches, want 3 after 2", n, len(src.fetched))
+	}
+}
+
+// A session this machine recorded must never be relabelled as another's, and
+// one pulled under one origin is not claimed again under another.
+func TestPullLeavesSessionsItDoesNotOwn(t *testing.T) {
+	lockDir(t)
+	database := testDB(t)
+	key := "claude/-Users-x-proj/" + idA + ".jsonl"
+	if _, err := database.Exec(`INSERT INTO sessions (session_id, project_key) VALUES (?, '-p')`, idA); err != nil {
+		t.Fatal(err)
+	}
+	src := &fakeSource{files: map[string]string{key: claudeLines(idA, 2)}, etags: map[string]string{key: "v1"}}
+
+	st, err := Pull(context.Background(), database, src, PullOptions{Origin: "laptop"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Claimed["local"] != 1 || st.Imported != 0 {
+		t.Errorf("pull = %+v, want the local session left alone", st)
+	}
+	if origin, _ := db.SessionOrigin(database, idA); origin != "" {
+		t.Errorf("a local session was relabelled %q", origin)
+	}
+}
+
+// A transfer that failed is not recorded, so the next pull tries it again.
+func TestPullRetriesWhatFailed(t *testing.T) {
+	lockDir(t)
+	database := testDB(t)
+	key := "claude/-Users-x-proj/" + idA + ".jsonl"
+	src := &fakeSource{
+		files: map[string]string{key: claudeLines(idA, 1)}, etags: map[string]string{key: "v1"}, failOn: key,
+	}
+	st, _ := Pull(context.Background(), database, src, PullOptions{Origin: "laptop"})
+	if st.Failed != 1 {
+		t.Fatalf("pull = %+v, want one failure", st)
+	}
+	src.failOn = ""
+	st, err := Pull(context.Background(), database, src, PullOptions{Origin: "laptop"})
+	if err != nil || st.Imported != 1 {
+		t.Errorf("retry = %+v, %v; want the failed transcript imported", st, err)
+	}
+}
+
+func TestPullRequiresAnOrigin(t *testing.T) {
+	if _, err := Pull(context.Background(), testDB(t), &fakeSource{}, PullOptions{}); err == nil {
+		t.Error("a pull without an origin went ahead")
+	}
+}
+
+// fakeSink records uploads.
+type fakeSink struct{ put []string }
+
+func (f *fakeSink) Put(_ context.Context, key, _ string) error {
+	f.put = append(f.put, key)
+	return nil
+}
+
+func TestPushSendsOnlyWhatChangedAndNothingForgotten(t *testing.T) {
+	home := fakeHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", "")
+	database := testDB(t)
+	// Tombstone the pi session, as `remaimber forget` would.
+	if err := db.MarkPruned(database, []string{"cccccccc-0000-0000-0000-000000000003"}, "forget"); err != nil {
+		t.Fatal(err)
+	}
+
+	sink := &fakeSink{}
+	opts := PushOptions{Origin: "laptop", Dest: "s3://b/rmb"}
+	st, err := Push(context.Background(), database, sink, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Uploaded != 2 || st.Forgotten != 1 {
+		t.Errorf("push = %+v (uploaded %v), want claude and codex sent, the forgotten pi session held back", st, sink.put)
+	}
+	for _, k := range sink.put {
+		if strings.Contains(k, "subagents") {
+			t.Errorf("pushed %s, which is not a session", k)
+		}
+	}
+
+	st, err = Push(context.Background(), database, sink, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Uploaded != 0 || st.Unchanged != 2 {
+		t.Errorf("second push = %+v, want nothing re-sent", st)
+	}
+}
