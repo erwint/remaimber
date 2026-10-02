@@ -329,7 +329,9 @@ downloaded, since its file name says whose it is.
 
 A pulled session can be read here (`remaimber resume <id> --match ...`,
 `get_segments`) but resumed only on its own machine, where its transcript lives.
-Pulled sessions join the summary backlog like local ones, a few at a time.
+Pulled sessions join the summary backlog like local ones, a few at a time. A
+one-off machine whose sessions are pulled later can set `REMAIMBER_LLM=off`, so
+they are summarized once, by the machine that pulls them.
 
 ### Pushing to S3
 
@@ -352,7 +354,7 @@ pull on the other machine.
 | Env var | Default | Purpose |
 |---------|---------|---------|
 | `REMAIMBER_DB` | `~/.remaimber/remaimber.db` | Database path. One archive for every agent |
-| `REMAIMBER_LLM` | `claude` | Summary backend: `claude` (the local CLI) or an OpenAI-compatible base URL (`http://localhost:11434/v1` for Ollama, `http://localhost:1234/v1` for LM Studio) |
+| `REMAIMBER_LLM` | `claude` | Summary backend: `claude`, `codex` or `pi` (the local CLI), an OpenAI-compatible base URL (`http://localhost:11434/v1` for Ollama, `http://localhost:1234/v1` for LM Studio), or `off` to not summarize on this machine |
 | `REMAIMBER_LLM_MODEL` | `haiku` (claude backend) | Model used for summarization |
 | `REMAIMBER_LLM_KEY` | - | Bearer token for the HTTP backend |
 | `REMAIMBER_RETENTION` | - | Age after which the daily sweep prunes (`180d`, `2y`). Unset means keep everything |
@@ -382,6 +384,7 @@ using the auth it already has, or an OpenAI-compatible endpoint:
 | `codex` | `codex exec --ephemeral --skip-git-repo-check` | answer read from `--output-last-message` |
 | `pi` | `pi -p --no-session --no-tools` | |
 | a base URL | one HTTP call | e.g. `http://localhost:11434/v1` for Ollama |
+| `off` | nothing | sessions are archived and searchable, but not summarized here |
 
 Each runs from hooks, including inside a live session of the same agent. The
 ephemeral flags matter for more than tidiness: a persisted summarization session
@@ -389,6 +392,13 @@ would be imported as a conversation of its own, so the archive would fill with
 its own summaries. Codex and pi report no price, so their calls are counted at
 zero - the same treatment a self-hosted model gets. Where no CLI auth is
 available (headless, corporate), use the HTTP backend.
+
+`off` is for a machine whose sessions are summarized somewhere else - typically a
+one-off machine another one pulls from with `remaimber sync`, which would
+otherwise pay for the same summaries twice. Set it in the environment the agents
+run in, since the hooks inherit it. Nothing is attempted and nothing is recorded
+as failed; `remaimber summarize` says it is off rather than running, and
+`doctor` reports it as a note, not as a stuck backlog.
 
 A failed summary is recorded on the session and reported by `remaimber doctor`.
 The sweep runs from hooks that discard stderr, so a failure that was only printed

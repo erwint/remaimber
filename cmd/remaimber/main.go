@@ -1665,6 +1665,10 @@ func summarizeCmd() *cobra.Command {
 				fmt.Printf("Reindexed %d segment summaries.\n", n)
 				return nil
 			}
+			if cfg.Off() {
+				return fmt.Errorf("summarization is off on this machine (REMAIMBER_LLM=off): its sessions are summarized " +
+					"wherever they are pulled to. Unset REMAIMBER_LLM, or set a backend, to summarize here")
+			}
 			// --all lowers the bar to a single new message, so sessions that
 			// never crossed the threshold stop being permanently invisible.
 			if all {
@@ -1825,6 +1829,9 @@ func summarizeIfStaleCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg := summarizer.LoadConfig()
 			cfg.Cost = &summarizer.CostMeter{}
+			if cfg.Off() {
+				return nil
+			}
 			if !importer.ShouldSummarize() {
 				return nil
 			}
@@ -2991,7 +2998,12 @@ func doctorCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			cfg := summarizer.LoadConfig()
 			switch {
+			case cfg.Off():
+				// Deliberate, so neither the backlog nor a missing CLI is a problem.
+				fmt.Printf("  note  summarization is off (REMAIMBER_LLM=off): %d session(s) archived here, "+
+					"summarized wherever they are pulled to\n", c.Sessions)
 			case c.Sessions == 0:
 				warn("no sessions archived yet")
 			case c.Backlog > 0:
@@ -3027,8 +3039,8 @@ func doctorCmd() *cobra.Command {
 			// Which CLI has to be present depends on the configured backend —
 			// checking for `claude` on a machine summarizing through Codex
 			// reports a problem that is not there, and misses the one that is.
-			cfg := summarizer.LoadConfig()
 			switch {
+			case cfg.Off():
 			case cfg.IsHTTP():
 				ok("summarization backend: %s", cfg.Backend)
 			default:

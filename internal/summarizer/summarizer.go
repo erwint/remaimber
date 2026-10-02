@@ -144,6 +144,9 @@ func LoadConfig() Config {
 	if c.Backend == "" {
 		c.Backend = "claude"
 	}
+	if c.Off() {
+		c.Backend = "off"
+	}
 	if c.Model == "" && c.Backend == "claude" {
 		c.Model = "haiku"
 	}
@@ -212,6 +215,17 @@ func (c Config) WindowSize() int {
 		return c.Window
 	}
 	return DefaultWindow
+}
+
+// Off reports whether summarization is switched off (REMAIMBER_LLM=off).
+//
+// For a machine whose sessions are summarized somewhere else: a one-off
+// machine whose transcripts another one pulls with `remaimber sync` would
+// otherwise pay for the same summaries twice. Off is a setting rather than an
+// unreachable backend, so nothing is attempted and no failure is recorded —
+// a failed summary is reported as a stuck backlog, which this is not.
+func (c Config) Off() bool {
+	return strings.EqualFold(c.Backend, "off") || strings.EqualFold(c.Backend, "none")
 }
 
 // IsHTTP reports whether the backend is an OpenAI-compatible HTTP endpoint.

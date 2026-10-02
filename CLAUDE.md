@@ -95,7 +95,10 @@ shell out (`ssh` running a POSIX `sh` script, the `aws` CLI) rather than linking
 clients, so credentials resolve as they do for the user's own tools.
 
 Summarization runs through whichever CLI `REMAIMBER_LLM` names — `claude`
-(default), `codex`, `pi` — or an OpenAI-compatible URL. Each agent CLI is
+(default), `codex`, `pi` — or an OpenAI-compatible URL, or not at all with
+`off`, for a machine whose sessions are pulled and summarized elsewhere. `off`
+is a setting, not an unreachable backend: nothing is attempted, so no failure is
+recorded and doctor does not report a stuck backlog. Each agent CLI is
 invoked ephemerally (`--no-session-persistence`, `--ephemeral`, `--no-session`):
 a persisted summarization session would be imported as a conversation of its
 own, so the archive would fill with its own summaries.
