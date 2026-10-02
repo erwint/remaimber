@@ -6,10 +6,13 @@
 // segmented and searched by exactly the rules a local one is, and an archive
 // never has to trust another machine's schema version.
 //
-// The two transports differ in who has to act. Over ssh the other machine is
-// read directly — its agents' session directories are already the source, so
-// there is nothing to publish first. An S3 bucket is passive: a machine pushes
-// its transcripts into it under its own name, and others pull them from there.
+// Both transports read a location the same way: a prefix is a home directory
+// holding each agent's session directory where the agent keeps it, or, with an
+// agent named, that one directory. Over ssh that is the other machine itself;
+// in S3 it is whatever some other system copied there — a backup of a home, or
+// one agent's directory synced on its own — so remaimber reads that layout
+// rather than imposing one. A push writes the same layout, so what it writes
+// reads back like anything else.
 package remote
 
 import (
@@ -19,6 +22,8 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+
+	"github.com/erwint/remaimber/internal/importer"
 )
 
 // Location is where a sync reads from or writes to.
@@ -27,9 +32,9 @@ type Location struct {
 	// Host is the ssh destination ("user@host") or the S3 bucket.
 	Host string
 	Port string // ssh only
-	// Prefix narrows the location. Over ssh it is a directory on the remote
-	// (default: the remote home); in S3 it is a key prefix (default: the
-	// bucket root). Either way, may be empty.
+	// Prefix is the home directory (or, with an agent, the agent's session
+	// directory): a path on the remote over ssh (default: the remote home), a
+	// key prefix in S3 (default: the bucket root).
 	Prefix string
 }
 
@@ -101,15 +106,14 @@ type Source interface {
 // Sink receives this machine's transcripts.
 type Sink interface {
 	Put(ctx context.Context, key, localPath string) error
+	// Holds reports whether the location has a place for an agent's sessions.
+	Holds(agent string) bool
 }
 
 // Options configure a transport.
 type Options struct {
-	// Origin names the machine whose transcripts are read or written. An S3
-	// store keeps each machine under its own name; over ssh it only labels.
-	Origin string
-	// Agent says which agent's sessions an ssh path holds. Without it the path
-	// is treated as a home directory holding the usual agent directories.
+	// Agent says the prefix is that agent's session directory. Without it the
+	// prefix is a home directory holding the usual agent directories.
 	Agent string
 	// AWSProfile selects an AWS CLI profile; empty leaves AWS_PROFILE and the
 	// default credential chain to decide.
@@ -127,12 +131,38 @@ func OpenSource(loc *Location, opts Options) (Source, error) {
 	return nil, fmt.Errorf("unsupported sync scheme %q", loc.Scheme)
 }
 
-// OpenSink returns the writer for a location. Only a store can be pushed to:
+// root is one agent's session directory at a location.
+type root struct {
+	agent string
+	path  string // slash-separated; "" is the location's top
+}
+
+// agentRoots resolves a prefix into the agent directories it holds.
+func agentRoots(base, agent string) ([]root, error) {
+	base = strings.TrimSuffix(base, "/")
+	if agent != "" {
+		if _, ok := importer.AgentRoots[agent]; !ok {
+			return nil, fmt.Errorf("unknown agent %q: want claude, codex or pi", agent)
+		}
+		return []root{{agent: agent, path: base}}, nil
+	}
+	var roots []root
+	for _, a := range []string{importer.AgentClaude, importer.AgentCodex, importer.AgentPi} {
+		p := importer.AgentRoots[a]
+		if base != "" {
+			p = base + "/" + p
+		}
+		roots = append(roots, root{agent: a, path: p})
+	}
+	return roots, nil
+}
+
+// OpenSink returns the writer for a location. Only S3 can be pushed to:
 // over ssh the other machine reads this one directly, and writing transcripts
 // into its agent directories would make them look like its own.
 func OpenSink(loc *Location, opts Options) (Sink, error) {
 	if loc.Scheme != "s3" {
-		return nil, fmt.Errorf("push needs an s3:// store; over ssh, pull from this machine on the other one instead " +
+		return nil, fmt.Errorf("push needs an s3:// location; over ssh, pull from this machine on the other one instead " +
 			"(remaimber sync pull ssh://<this-host> --origin <name>)")
 	}
 	return newS3(loc, opts)
@@ -140,8 +170,8 @@ func OpenSink(loc *Location, opts Options) (Sink, error) {
 
 var originName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`)
 
-// ValidOrigin checks a machine name. It becomes a path segment in a store and a
-// value people filter on, so it is kept to characters that are safe as both.
+// ValidOrigin checks a machine name. It is a label people type and filter on,
+// so it is kept to characters that need no quoting anywhere.
 func ValidOrigin(name string) error {
 	if name == "" {
 		return fmt.Errorf("an origin is required: name the machine these conversations come from with --origin")

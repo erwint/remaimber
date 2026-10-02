@@ -45,21 +45,12 @@ func newSSH(loc *Location, opts Options) (*sshSource, error) {
 	if base == "" {
 		base = "~"
 	}
-	if opts.Agent != "" {
-		// The path is that agent's session directory itself.
-		if _, ok := importer.AgentRoots[opts.Agent]; !ok {
-			return nil, fmt.Errorf("unknown agent %q: want claude, codex or pi", opts.Agent)
-		}
-		s.roots = []sshRoot{{agent: opts.Agent, dir: shellPath(base), maxDepth: depthFor(opts.Agent)}}
-		return s, nil
+	roots, err := agentRoots(base, opts.Agent)
+	if err != nil {
+		return nil, err
 	}
-	// Otherwise it is a home directory, holding each agent where it would.
-	for _, agent := range []string{importer.AgentClaude, importer.AgentCodex, importer.AgentPi} {
-		s.roots = append(s.roots, sshRoot{
-			agent:    agent,
-			dir:      shellPath(strings.TrimSuffix(base, "/") + "/" + importer.AgentRoots[agent]),
-			maxDepth: depthFor(agent),
-		})
+	for _, r := range roots {
+		s.roots = append(s.roots, sshRoot{agent: r.agent, dir: shellPath(r.path), maxDepth: depthFor(r.agent)})
 	}
 	return s, nil
 }

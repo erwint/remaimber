@@ -77,7 +77,11 @@ session removes the row that records the import, so without it the next sweep
 reads the transcript back in. `remaimber forget <id>` lifts one.
 
 `remaimber sync` (`internal/remote`) pulls other machines' transcripts over ssh
-or from an S3 store, and pushes this machine's to one. It moves transcript files,
+or from S3, and can push this machine's to S3. S3 is mainly read: assume some
+other system copies session directories there, so a location is read in the
+agents' native layout - a home holding `.claude/projects`, `.codex/sessions`,
+`.pi/agent/sessions`, or with `--agent` one agent's directory - and push writes
+that same layout rather than one of its own. It moves transcript files,
 not rows, and imports them with the ordinary importer from a temporary copy, so
 there is no mirror on disk and no second parser. Keys are
 `<agent>/<path under that agent's root>` on every transport
@@ -85,7 +89,8 @@ there is no mirror on disk and no second parser. Keys are
 recorded only after a successful import or upload so a failure retries. A
 pulled session carries `sessions.origin`; a session belongs to whichever origin
 recorded it first, so a local one is never relabelled, and push sends only the
-local agent directories, so nothing pulled is republished. Both transports
+local agent directories, so nothing pulled is republished. Pull etags are keyed
+by origin, push etags by destination. Both transports
 shell out (`ssh` running a POSIX `sh` script, the `aws` CLI) rather than linking
 clients, so credentials resolve as they do for the user's own tools.
 

@@ -41,7 +41,7 @@ type PullStats struct {
 // changed since the last pull from that origin.
 //
 // A session belongs to whichever origin recorded it first. Two machines that
-// pull from each other through a store would otherwise trade their own
+// pull from each other through a bucket would otherwise trade their own
 // conversations back and forth, each time relabelling the other's copy; and a
 // session recorded here must never be relabelled as foreign.
 func Pull(ctx context.Context, database *sql.DB, src Source, opts PullOptions) (*PullStats, error) {
@@ -146,8 +146,10 @@ func pullOne(ctx context.Context, database *sql.DB, src Source, o Object, opts P
 
 // PushOptions configure a push.
 type PushOptions struct {
-	Origin string // this machine's name in the store
-	Dest   string // the location, recorded beside each etag for display
+	// Dest is the location pushed to. Etags are kept per destination, so
+	// pushing to a second bucket sends everything there rather than trusting
+	// what the first one received.
+	Dest   string
 	Force  bool
 	DryRun bool
 }
@@ -167,16 +169,16 @@ type PushStats struct {
 //
 // Only transcripts in this machine's agent directories are sent, so what was
 // pulled from elsewhere is never republished as this machine's; and a session
-// pruned or forgotten here stays that way rather than reappearing in a store.
+// pruned or forgotten here stays that way rather than reappearing in a bucket.
 func Push(ctx context.Context, database *sql.DB, sink Sink, opts PushOptions) (*PushStats, error) {
-	if err := ValidOrigin(opts.Origin); err != nil {
-		return nil, err
+	if opts.Dest == "" {
+		return nil, errors.New("push needs a destination")
 	}
 	files, err := importer.ScanAll()
 	if err != nil {
 		return nil, err
 	}
-	etags, err := db.RemoteETags(database, opts.Origin, db.SyncPush)
+	etags, err := db.RemoteETags(database, opts.Dest, db.SyncPush)
 	if err != nil {
 		return nil, err
 	}
@@ -187,7 +189,7 @@ func Push(ctx context.Context, database *sql.DB, sink Sink, opts PushOptions) (*
 			return st, err
 		}
 		key := importer.RemoteKey(sf)
-		if key == "" {
+		if key == "" || !sink.Holds(sf.AgentOf()) {
 			continue
 		}
 		st.Local++
@@ -215,7 +217,7 @@ func Push(ctx context.Context, database *sql.DB, sink Sink, opts PushOptions) (*
 			continue
 		}
 		st.Uploaded++
-		if err := db.RecordRemoteObject(database, opts.Origin, db.SyncPush, key, etag, info.Size(), opts.Dest); err != nil {
+		if err := db.RecordRemoteObject(database, opts.Dest, db.SyncPush, key, etag, info.Size(), opts.Dest); err != nil {
 			return st, err
 		}
 	}

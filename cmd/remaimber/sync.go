@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -20,9 +19,15 @@ func syncCmd() *cobra.Command {
 		Short: "Bring in conversations from other machines, over ssh or through S3",
 		Long: `Bring in conversations from other machines, over ssh or through S3.
 
-Over ssh, pull reads the other machine's agent directories directly - nothing
-needs installing there. An S3 bucket is a store between machines: each one
-pushes its own transcripts under its name, and the others pull them.
+A location is ssh://[user@]host[/path] or s3://bucket[/prefix], and the path
+is read as a home directory with each agent's sessions in their native layout:
+.claude/projects, .codex/sessions, .pi/agent/sessions. With --agent, the path is
+that one agent's session directory instead, for sessions kept or copied
+anywhere else.
+
+Over ssh, nothing needs installing on the other machine. In S3, whatever already
+syncs session directories into the bucket can keep doing so; push is there for a
+machine with nothing else to do it.
 
 Every pulled session is labelled with the --origin it came from, shown as
 @origin in list and search, and filterable with --origin. Only what changed
@@ -31,9 +36,11 @@ unchanged one is not fetched again.`,
 		Example: `  # Read another machine's sessions directly
   remaimber sync pull ssh://build@mac-mini.local --origin mac-mini
 
-  # Publish this machine's sessions to a bucket, and pull another's from it
-  remaimber sync push s3://team-bucket/remaimber --aws-profile work
-  remaimber sync pull s3://team-bucket/remaimber --origin laptop --aws-profile work
+  # Sessions some other system copies into a bucket, one home per machine
+  remaimber sync pull s3://team-bucket/homes/laptop --origin laptop --aws-profile work
+
+  # Only Codex's session directory, copied on its own
+  remaimber sync pull s3://team-bucket/laptop/codex-sessions --agent codex --origin laptop
 
   # What has been synced, from where
   remaimber sync status`,
@@ -50,16 +57,20 @@ func syncPullCmd() *cobra.Command {
 		Short: "Import another machine's conversations",
 		Long: `Import another machine's conversations.
 
+The path is a home directory holding each agent's sessions in their native
+layout - .claude/projects, .codex/sessions, .pi/agent/sessions - and any agent
+missing there is skipped. With --agent it is that agent's session directory
+itself, in that agent's native layout.
+
 ssh://[user@]host[:port][/path]
   Reads the remote over ssh, which must log in without a prompt (a key or an
-  agent). The path is a home directory holding .claude/projects, .codex/sessions
-  and .pi/agent/sessions (default: the remote home). With --agent it is that
-  agent's session directory itself, for one kept somewhere else.
+  agent). Default path: the remote home.
 
 s3://bucket[/prefix]
-  Reads <prefix>/<origin>/ in a store filled by 'remaimber sync push'. Uses the
-  AWS CLI and its usual credentials: --aws-profile, else AWS_PROFILE, else the
-  default chain.
+  Reads objects under the prefix, as written by whatever syncs them there (or by
+  'remaimber sync push'). Uses the AWS CLI and its usual credentials:
+  --aws-profile, else AWS_PROFILE, else the default chain. Default prefix: the
+  bucket root.
 
 --origin is required: it names the machine, and is how its sessions stay
 distinguishable from this one's. A session already in the archive - recorded
@@ -67,7 +78,8 @@ here, or pulled under another origin - is left as it is.`,
 		Example: `  remaimber sync pull ssh://build@mac-mini.local --origin mac-mini
   remaimber sync pull ssh://nas/~/backups/laptop-home --origin laptop
   remaimber sync pull ssh://box/srv/codex/sessions --agent codex --origin box
-  remaimber sync pull s3://team-bucket/remaimber --origin laptop --dry-run`,
+  remaimber sync pull s3://team-bucket/homes/laptop --origin laptop --dry-run
+  remaimber sync pull s3://team-bucket/laptop/claude-projects --agent claude --origin laptop`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := remote.ValidOrigin(origin); err != nil {
@@ -77,10 +89,7 @@ here, or pulled under another origin - is left as it is.`,
 			if err != nil {
 				return err
 			}
-			if agent != "" && loc.Scheme != "ssh" {
-				return fmt.Errorf("--agent applies to an ssh path; a store's keys already name the agent")
-			}
-			src, err := remote.OpenSource(loc, remote.Options{Origin: origin, Agent: agent, AWSProfile: profile})
+			src, err := remote.OpenSource(loc, remote.Options{Agent: agent, AWSProfile: profile})
 			if err != nil {
 				return err
 			}
@@ -114,7 +123,7 @@ here, or pulled under another origin - is left as it is.`,
 		},
 	}
 	cmd.Flags().StringVar(&origin, "origin", "", "Name of the machine these conversations come from (required)")
-	cmd.Flags().StringVar(&agent, "agent", "", "ssh only: the path is this agent's session directory (claude, codex or pi)")
+	cmd.Flags().StringVar(&agent, "agent", "", "The path is this agent's session directory (claude, codex or pi)")
 	cmd.Flags().StringVar(&profile, "aws-profile", "", "AWS CLI profile for s3:// (default: AWS_PROFILE)")
 	cmd.Flags().BoolVar(&force, "force", false, "Fetch and re-import everything, ignoring recorded etags")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would be fetched, without fetching")
@@ -144,32 +153,31 @@ func printPull(loc *remote.Location, origin string, st *remote.PullStats, dryRun
 }
 
 func syncPushCmd() *cobra.Command {
-	var origin, profile string
+	var agent, profile string
 	var force, dryRun, jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "push <s3://bucket[/prefix]>",
-		Short: "Publish this machine's conversations to an S3 store",
-		Long: `Publish this machine's conversations to an S3 store, under
-<prefix>/<origin>/, for other machines to pull.
+		Short: "Copy this machine's conversations into S3",
+		Long: `Copy this machine's conversations into S3, for when nothing else already does.
+
+They are written in the agents' native layout under the prefix, as a home
+directory would hold them (.claude/projects/..., .codex/sessions/...), so
+'sync pull' on another machine reads them like any other copy. Give each
+machine its own prefix. With --agent, only that agent's sessions are written,
+and the prefix is its session directory.
 
 Only this machine's own transcripts are sent - nothing pulled from elsewhere -
 and a session pruned or forgotten here is not. Unchanged transcripts are skipped
 by etag. Over ssh there is nothing to push: run pull on the other machine.`,
-		Example: `  remaimber sync push s3://team-bucket/remaimber
-  remaimber sync push s3://team-bucket/remaimber --origin laptop --aws-profile work`,
+		Example: `  remaimber sync push s3://team-bucket/homes/laptop --aws-profile work
+  remaimber sync push s3://team-bucket/laptop/codex-sessions --agent codex`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if origin == "" {
-				origin = defaultOrigin()
-			}
-			if err := remote.ValidOrigin(origin); err != nil {
-				return fmt.Errorf("%w (this machine's name did not make a usable default; pass --origin)", err)
-			}
 			loc, err := remote.Parse(args[0])
 			if err != nil {
 				return err
 			}
-			sink, err := remote.OpenSink(loc, remote.Options{Origin: origin, AWSProfile: profile})
+			sink, err := remote.OpenSink(loc, remote.Options{Agent: agent, AWSProfile: profile})
 			if err != nil {
 				return err
 			}
@@ -181,7 +189,7 @@ by etag. Over ssh there is nothing to push: run pull on the other machine.`,
 			defer database.Close()
 
 			st, err := remote.Push(cmd.Context(), database, sink, remote.PushOptions{
-				Origin: origin, Dest: loc.String(), Force: force, DryRun: dryRun,
+				Dest: loc.String(), Force: force, DryRun: dryRun,
 			})
 			if st != nil && jsonOut {
 				enc := json.NewEncoder(os.Stdout)
@@ -196,7 +204,7 @@ by etag. Over ssh there is nothing to push: run pull on the other machine.`,
 				if dryRun {
 					verb = "Would upload"
 				}
-				fmt.Printf("%s as %q: %d local transcript(s), %d unchanged\n", loc, origin, st.Local, st.Unchanged)
+				fmt.Printf("%s: %d local transcript(s), %d unchanged\n", loc, st.Local, st.Unchanged)
 				fmt.Printf("%s %d (%s)\n", verb, st.Uploaded, sizeOf(st.Bytes))
 				if st.Forgotten > 0 {
 					fmt.Printf("Held back %d pruned or forgotten here\n", st.Forgotten)
@@ -208,7 +216,7 @@ by etag. Over ssh there is nothing to push: run pull on the other machine.`,
 			return err
 		},
 	}
-	cmd.Flags().StringVar(&origin, "origin", "", "This machine's name in the store (default: its hostname)")
+	cmd.Flags().StringVar(&agent, "agent", "", "Push only this agent's sessions; the prefix is its session directory")
 	cmd.Flags().StringVar(&profile, "aws-profile", "", "AWS CLI profile (default: AWS_PROFILE)")
 	cmd.Flags().BoolVar(&force, "force", false, "Upload everything, ignoring recorded etags")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would be uploaded, without uploading")
@@ -248,7 +256,7 @@ func syncStatusCmd() *cobra.Command {
 						s.Origin, s.Objects, s.Sessions, s.LastSync, s.Source)
 				} else {
 					fmt.Printf("push  %-16s %5d transcript(s)                    last %s  to %s\n",
-						s.Origin, s.Objects, s.LastSync, s.Source)
+						"", s.Objects, s.LastSync, s.Source)
 				}
 			}
 			return nil
@@ -256,17 +264,6 @@ func syncStatusCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output as JSON")
 	return cmd
-}
-
-// defaultOrigin is this machine's short hostname, lowercased: what someone
-// would call it, and stable across networks that append different domains.
-func defaultOrigin() string {
-	h, err := os.Hostname()
-	if err != nil {
-		return ""
-	}
-	h, _, _ = strings.Cut(h, ".")
-	return strings.ToLower(h)
 }
 
 func sizeOf(n int64) string {

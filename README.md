@@ -66,7 +66,7 @@ installed, which are wired up, and what finishes the job.
 | Codex | **0.148.0+** - asynchronous command hooks. Older versions log `skipping async hooks, not supported yet` and run only the synchronous ones, so the archive is still written before a compaction but background maintenance never fires |
 | pi | 0.84+ |
 | Go | 1.26+, to build from source |
-| ssh / AWS CLI | only for `remaimber sync`: ssh that logs in without a prompt, or `aws` for an S3 store |
+| ssh / AWS CLI | only for `remaimber sync`: ssh that logs in without a prompt, or the `aws` CLI for S3 |
 
 Nothing above is required to archive: `remaimber import` reads every agent's
 transcripts off disk on its own. Wiring an agent up adds what a periodic import
@@ -189,8 +189,7 @@ remaimber update --check
 
 # Bring in other machines' conversations (see "Syncing between machines")
 remaimber sync pull ssh://build@mac-mini.local --origin mac-mini
-remaimber sync push s3://team-bucket/remaimber
-remaimber sync pull s3://team-bucket/remaimber --origin laptop
+remaimber sync pull s3://team-bucket/homes/laptop --origin laptop
 remaimber list --origin mac-mini                # one machine's sessions; "local" for this one's
 
 # Bound the archive's size (nothing is dropped unless you ask)
@@ -276,51 +275,64 @@ by itself.
 
 ## Syncing between machines
 
-`remaimber sync` brings conversations from other machines into this archive, so
-search and recall cover work done anywhere. What moves is the agents' own
-transcript files, not database rows: each pulled file is imported by the same
-rules as a local one.
+`remaimber sync pull` brings conversations from other machines into this
+archive, so search and recall cover work done anywhere. What moves is the
+agents' own transcript files, not database rows: each pulled file is imported by
+the same rules as a local one.
 
-**Over ssh**, `pull` reads the other machine's agent directories directly.
-Nothing needs installing there, but ssh must log in without a prompt (a key or
-an agent); a host that would ask for a password fails at once.
+A location is a path over ssh or a prefix in S3, and remaimber reads it in the
+agents' native session layout. By default the path is a home directory, with
+sessions where each agent keeps them: `.claude/projects`, `.codex/sessions`,
+`.pi/agent/sessions` (agents missing there are skipped). With `--agent`, the
+path is that one agent's session directory itself, for sessions kept or copied
+anywhere else.
 
 ```bash
+# Another machine, read directly over ssh (default path: the remote home)
 remaimber sync pull ssh://build@mac-mini.local --origin mac-mini
-remaimber sync pull ssh://nas/~/backups/laptop-home --origin laptop     # a copied home
-remaimber sync pull ssh://box/srv/codex/sessions --agent codex --origin box
+
+# Sessions something else copies into S3: a home per machine...
+remaimber sync pull s3://team-bucket/homes/laptop --origin laptop --aws-profile work
+# ...or one agent's directory on its own
+remaimber sync pull s3://team-bucket/laptop/codex-sessions --agent codex --origin laptop
 ```
 
-The path is a home directory holding `.claude/projects`, `.codex/sessions` and
-`.pi/agent/sessions` (default: the remote home). With `--agent` it is that one
-agent's session directory, for one kept somewhere else.
-
-**Through S3**, the bucket is a store between machines: each one pushes its own
-transcripts under `<prefix>/<origin>/`, and the others pull from there. Transfers
-go through the AWS CLI, so credentials resolve as they do for `aws s3 ls`:
-`--aws-profile`, else `AWS_PROFILE`, else the default chain.
-
-```bash
-remaimber sync push s3://team-bucket/remaimber                    # as this hostname
-remaimber sync pull s3://team-bucket/remaimber --origin laptop --aws-profile work
-```
+Over ssh nothing needs installing on the other machine, but ssh must log in
+without a prompt (a key or an agent); a host that would ask for a password fails
+at once. S3 goes through the AWS CLI, so credentials resolve as they do for
+`aws s3 ls`: `--aws-profile`, else `AWS_PROFILE`, else the default chain. Only
+the agents' session directories are listed, so a bucket holding whole home
+backups costs no more to sync than one holding only sessions.
 
 A pull always needs `--origin`, naming the machine the sessions came from. They
 show as `@origin` in `list` and `search`, and `--origin` filters by it (`local`
 for this machine's own). A session already in the archive - recorded here, or
-pulled under another name - is left as it is, so two machines syncing through
-one store never trade their own conversations back and forth.
+pulled under another name - is left as it is.
 
-Each object's etag is recorded, so a repeat sync transfers only what changed:
+Each object's etag is recorded, so a repeat pull transfers only what changed:
 the S3 ETag, or size and modification time over ssh. `--force` ignores them,
 `--dry-run` shows what would move, and `remaimber sync status` lists every
 origin with its last sync.
 
+A pulled session can be read here (`remaimber resume <id> --match ...`,
+`get_segments`) but resumed only on its own machine, where its transcript lives.
+Pulled sessions join the summary backlog like local ones, a few at a time.
+
+### Pushing to S3
+
+When nothing else copies a machine's sessions into S3, `sync push` does, in the
+same native layout, so another machine pulls them like any other copy. Give each
+machine its own prefix.
+
+```bash
+remaimber sync push s3://team-bucket/homes/laptop
+remaimber sync push s3://team-bucket/laptop/codex-sessions --agent codex
+```
+
 A push sends only this machine's own transcripts - never what it pulled - and
-holds back any session pruned or forgotten here. A pulled session can be read
-here (`remaimber resume <id> --match ...`, `get_segments`) but resumed only on
-its own machine, where its transcript lives. Pulled sessions join the summary
-backlog like local ones, a few at a time.
+holds back any session pruned or forgotten here. Unchanged transcripts are
+skipped by etag, tracked per destination. Over ssh there is nothing to push: run
+pull on the other machine.
 
 ## Configuration
 

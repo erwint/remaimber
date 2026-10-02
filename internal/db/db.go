@@ -26,9 +26,10 @@ CREATE TABLE IF NOT EXISTS pruned_sessions (
 -- What sync has seen of another machine's transcripts. A pull compares each
 -- listed object's etag with the one recorded here and fetches only what changed;
 -- a push records the local file's etag so an unchanged transcript is not sent
--- again. Keyed by origin, so two machines' identical paths never collide.
+-- again. Pulls are keyed by origin, so two machines' identical paths never
+-- collide; pushes by destination, since it is the destination that has them.
 CREATE TABLE IF NOT EXISTS remote_objects (
-	origin     TEXT NOT NULL,
+	origin     TEXT NOT NULL,       -- pull: the origin name; push: the destination
 	direction  TEXT NOT NULL,       -- 'pull' | 'push'
 	key        TEXT NOT NULL,       -- <agent>/<path under that agent's root>
 	etag       TEXT NOT NULL,

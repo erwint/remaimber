@@ -3049,7 +3049,7 @@ func doctorCmd() *cobra.Command {
 					if st.Direction == db.SyncPull {
 						ok("pulled %d session(s) from %s, last %s (%s)", st.Sessions, st.Origin, st.LastSync, st.Source)
 					} else {
-						ok("pushed %d transcript(s) as %s, last %s (%s)", st.Objects, st.Origin, st.LastSync, st.Source)
+						ok("pushed %d transcript(s) to %s, last %s", st.Objects, st.Source, st.LastSync)
 					}
 					needsAWS = needsAWS || strings.HasPrefix(st.Source, "s3://")
 				}

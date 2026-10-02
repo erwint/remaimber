@@ -181,41 +181,130 @@ func TestSSHEmptyHome(t *testing.T) {
 
 func TestParseS3Listing(t *testing.T) {
 	data := []byte(`[
-		{"Key": "rmb/laptop/claude/-p/x.jsonl", "Size": 12, "ETag": "\"abc123\""},
-		{"Key": "rmb/laptop/claude/-p/readme.txt", "Size": 3, "ETag": "\"zzz\""}
+		{"Key": "homes/laptop/.claude/projects/-p/x.jsonl", "Size": 12, "ETag": "\"abc123\""},
+		{"Key": "homes/laptop/.claude/projects/-p/readme.txt", "Size": 3, "ETag": "\"zzz\""}
 	]`)
-	objs, err := parseS3Listing(data, "rmb/laptop/")
+	objs, err := parseS3Listing(data, "claude", "homes/laptop/.claude/projects/")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(objs) != 1 || objs[0].Key != "claude/-p/x.jsonl" || objs[0].ETag != "abc123" || objs[0].Size != 12 {
-		t.Errorf("objs = %+v, want the transcript with its key relative to the origin and its etag unquoted", objs)
+		t.Errorf("objs = %+v, want the transcript keyed under its agent, its etag unquoted", objs)
 	}
 	// The CLI prints null for a prefix with nothing under it.
-	if objs, err := parseS3Listing([]byte("null\n"), "x/"); err != nil || len(objs) != 0 {
+	if objs, err := parseS3Listing([]byte("null\n"), "claude", "x/"); err != nil || len(objs) != 0 {
 		t.Errorf("null listing = %v, %v", objs, err)
 	}
 }
 
-// The store keeps each machine under its own name, below the prefix.
-func TestS3KeysSitUnderTheOrigin(t *testing.T) {
-	loc, _ := Parse("s3://bucket/rmb")
-	s, err := newS3(loc, Options{Origin: "laptop"})
+// fakeBucket stands in for the AWS CLI over an in-memory bucket.
+type fakeBucket struct {
+	objects map[string]string // full key -> content
+	lists   []string          // prefixes listed
+	puts    []string          // destination URLs
+}
+
+func (b *fakeBucket) run(_ context.Context, args []string, _ io.Reader, w io.Writer) error {
+	switch {
+	case args[0] == "s3api":
+		var prefix string
+		for i, a := range args {
+			if a == "--prefix" {
+				prefix = args[i+1]
+			}
+		}
+		b.lists = append(b.lists, prefix)
+		var items []string
+		for k, v := range b.objects {
+			if strings.HasPrefix(k, prefix) {
+				items = append(items, fmt.Sprintf(`{"Key":%q,"Size":%d,"ETag":"\"%x\""}`, k, len(v), len(v)))
+			}
+		}
+		if len(items) == 0 {
+			_, err := io.WriteString(w, "null")
+			return err
+		}
+		_, err := io.WriteString(w, "["+strings.Join(items, ",")+"]")
+		return err
+	case args[0] == "s3" && args[len(args)-1] == "-":
+		key := strings.TrimPrefix(args[len(args)-2], "s3://bucket/")
+		_, err := io.WriteString(w, b.objects[key])
+		return err
+	default:
+		b.puts = append(b.puts, args[len(args)-1])
+		return nil
+	}
+}
+
+func s3With(t *testing.T, b *fakeBucket, loc, agent string) *s3Store {
+	t.Helper()
+	l, err := Parse(loc)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var calls [][]string
-	s.run = func(ctx context.Context, args []string, stdin io.Reader, w io.Writer) error {
-		calls = append(calls, args)
-		return nil
+	s, err := newS3(l, Options{Agent: agent})
+	if err != nil {
+		t.Fatal(err)
 	}
-	s.Put(context.Background(), "claude/-p/x.jsonl", "/tmp/x.jsonl")
-	got := strings.Join(calls[0], " ")
-	if !strings.Contains(got, "s3://bucket/rmb/laptop/claude/-p/x.jsonl") {
-		t.Errorf("put ran %q", got)
+	s.run = b.run
+	return s
+}
+
+// A bucket some other system fills with a copy of each machine's home holds
+// more than sessions. Only the agents' own directories are listed, and in
+// their native layout.
+func TestS3ReadsAHomeCopiedIntoTheBucket(t *testing.T) {
+	b := &fakeBucket{objects: map[string]string{
+		"homes/laptop/.claude/projects/-Users-x-proj/" + idA + ".jsonl":                                                  claudeLines(idA, 1),
+		"homes/laptop/.codex/sessions/2026/10/01/rollout-2026-10-01T10-00-00-bbbbbbbb-0000-0000-0000-000000000002.jsonl": "{}\n",
+		"homes/laptop/Documents/taxes.jsonl":                                                                             "not a session",
+		"homes/laptop/.claude/settings.json":                                                                             "{}",
+		"homes/desk/.claude/projects/-p/other.jsonl":                                                                     "another machine",
+	}}
+	src := s3With(t, b, "s3://bucket/homes/laptop", "")
+	objs, err := src.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := newS3(loc, Options{}); err == nil {
-		t.Error("an S3 store without an origin has nowhere to put anything")
+	if len(objs) != 2 || objs[0].Key != "claude/-Users-x-proj/"+idA+".jsonl" ||
+		!strings.HasPrefix(objs[1].Key, "codex/2026/10/01/") {
+		t.Errorf("objs = %+v, want the one Claude and one Codex session, keyed by agent", objs)
+	}
+	for _, p := range b.lists {
+		if !strings.HasPrefix(p, "homes/laptop/.") {
+			t.Errorf("listed %q: only the agents' session directories should be listed", p)
+		}
+	}
+
+	var buf bytes.Buffer
+	if err := src.Fetch(context.Background(), objs[0].Key, &buf); err != nil || !strings.Contains(buf.String(), idA) {
+		t.Errorf("fetch = %q, %v", buf.String(), err)
+	}
+}
+
+// One agent's session directory, copied on its own under any name.
+func TestS3AgentDirectoryAnywhere(t *testing.T) {
+	b := &fakeBucket{objects: map[string]string{
+		"laptop/claude-projects/-Users-x-proj/" + idA + ".jsonl": claudeLines(idA, 1),
+	}}
+	src := s3With(t, b, "s3://bucket/laptop/claude-projects", "claude")
+	objs, err := src.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(objs) != 1 || objs[0].Key != "claude/-Users-x-proj/"+idA+".jsonl" {
+		t.Errorf("objs = %+v", objs)
+	}
+
+	// And a push writes the native layout back, so a pull reads it the same way.
+	if err := src.Put(context.Background(), "claude/-p/x.jsonl", "/tmp/x.jsonl"); err != nil {
+		t.Fatal(err)
+	}
+	if len(b.puts) != 1 || b.puts[0] != "s3://bucket/laptop/claude-projects/-p/x.jsonl" {
+		t.Errorf("put to %v", b.puts)
+	}
+	if src.Holds("codex") {
+		t.Error("an agent-scoped location claims to hold another agent")
 	}
 }
 
@@ -361,6 +450,8 @@ func (f *fakeSink) Put(_ context.Context, key, _ string) error {
 	return nil
 }
 
+func (f *fakeSink) Holds(string) bool { return true }
+
 func TestPushSendsOnlyWhatChangedAndNothingForgotten(t *testing.T) {
 	home := fakeHome(t)
 	t.Setenv("HOME", home)
@@ -372,7 +463,7 @@ func TestPushSendsOnlyWhatChangedAndNothingForgotten(t *testing.T) {
 	}
 
 	sink := &fakeSink{}
-	opts := PushOptions{Origin: "laptop", Dest: "s3://b/rmb"}
+	opts := PushOptions{Dest: "s3://b/homes/laptop"}
 	st, err := Push(context.Background(), database, sink, opts)
 	if err != nil {
 		t.Fatal(err)
