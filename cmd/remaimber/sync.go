@@ -126,7 +126,7 @@ here, or pulled under another origin - is left as it is.`,
 	cmd.Flags().StringVar(&agent, "agent", "", "The path is this agent's session directory (claude, codex or pi)")
 	cmd.Flags().StringVar(&profile, "aws-profile", "", "AWS CLI profile for s3:// (default: AWS_PROFILE)")
 	cmd.Flags().BoolVar(&force, "force", false, "Fetch and re-import everything, ignoring recorded etags")
-	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would be fetched, without fetching")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "List every file and whether it would be fetched or skipped, and why; transfer nothing")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output as JSON")
 	return cmd
 }
@@ -134,7 +134,8 @@ here, or pulled under another origin - is left as it is.`,
 func printPull(loc *remote.Location, origin string, st *remote.PullStats, dryRun bool) {
 	fmt.Printf("%s as %q: %d transcript(s) listed, %d unchanged\n", loc, origin, st.Listed, st.Unchanged)
 	if dryRun {
-		fmt.Printf("Would fetch %d (%s)\n", st.Fetched, sizeOf(st.Bytes))
+		printChanges(st.Changes)
+		fmt.Printf("Would fetch %d (%s); nothing was transferred\n", st.Fetched, sizeOf(st.Bytes))
 		return
 	}
 	if st.Fetched > 0 {
@@ -200,12 +201,13 @@ by etag. Over ssh there is nothing to push: run pull on the other machine.`,
 				return err
 			}
 			if st != nil {
-				verb := "Uploaded"
-				if dryRun {
-					verb = "Would upload"
-				}
 				fmt.Printf("%s: %d local transcript(s), %d unchanged\n", loc, st.Local, st.Unchanged)
-				fmt.Printf("%s %d (%s)\n", verb, st.Uploaded, sizeOf(st.Bytes))
+				if dryRun {
+					printChanges(st.Changes)
+					fmt.Printf("Would upload %d (%s); nothing was transferred\n", st.Uploaded, sizeOf(st.Bytes))
+				} else {
+					fmt.Printf("Uploaded %d (%s)\n", st.Uploaded, sizeOf(st.Bytes))
+				}
 				if st.Forgotten > 0 {
 					fmt.Printf("Held back %d pruned or forgotten here\n", st.Forgotten)
 				}
@@ -219,7 +221,7 @@ by etag. Over ssh there is nothing to push: run pull on the other machine.`,
 	cmd.Flags().StringVar(&agent, "agent", "", "Push only this agent's sessions; the prefix is its session directory")
 	cmd.Flags().StringVar(&profile, "aws-profile", "", "AWS CLI profile (default: AWS_PROFILE)")
 	cmd.Flags().BoolVar(&force, "force", false, "Upload everything, ignoring recorded etags")
-	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would be uploaded, without uploading")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "List every file and whether it would be uploaded or skipped, and why; transfer nothing")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output as JSON")
 	return cmd
 }
@@ -264,6 +266,19 @@ func syncStatusCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output as JSON")
 	return cmd
+}
+
+// printChanges lists a dry run's transcripts: those that would move first,
+// then those that would be skipped, each with why.
+func printChanges(changes []remote.Change) {
+	for _, moving := range []bool{true, false} {
+		for _, c := range changes {
+			if (c.Action != "skip") != moving {
+				continue
+			}
+			fmt.Printf("  %-6s %-14s %8s  %s\n", c.Action, c.Reason, sizeOf(c.Size), c.Key)
+		}
+	}
 }
 
 func sizeOf(n int64) string {

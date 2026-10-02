@@ -412,6 +412,10 @@ func TestPullLeavesSessionsItDoesNotOwn(t *testing.T) {
 	if st.Claimed["local"] != 1 || st.Imported != 0 {
 		t.Errorf("pull = %+v, want the local session left alone", st)
 	}
+	// Whose it is shows in the key, so it is not even downloaded.
+	if len(src.fetched) != 0 {
+		t.Errorf("fetched %v, a session it was going to leave alone", src.fetched)
+	}
 	if origin, _ := db.SessionOrigin(database, idA); origin != "" {
 		t.Errorf("a local session was relabelled %q", origin)
 	}
@@ -483,5 +487,98 @@ func TestPushSendsOnlyWhatChangedAndNothingForgotten(t *testing.T) {
 	}
 	if st.Uploaded != 0 || st.Unchanged != 2 {
 		t.Errorf("second push = %+v, want nothing re-sent", st)
+	}
+}
+
+// A dry run says what would move, and moves nothing: no fetch, no import, and
+// no etag recorded, or the real run after it would skip everything it listed.
+func TestPullDryRunListsWithoutTouching(t *testing.T) {
+	lockDir(t)
+	database := testDB(t)
+	const idB = "bbbbbbbb-0000-0000-0000-00000000000b"
+	const idL = "cccccccc-0000-0000-0000-00000000000c"
+	kA := "claude/-Users-x-proj/" + idA + ".jsonl"
+	kB := "claude/-Users-x-proj/" + idB + ".jsonl"
+	kL := "claude/-Users-x-proj/" + idL + ".jsonl"
+	kN := "claude/-Users-x-proj/" + idA + "/subagents/agent-1.jsonl"
+	src := &fakeSource{
+		files: map[string]string{kA: claudeLines(idA, 1), kB: claudeLines(idB, 1), kL: claudeLines(idL, 1), kN: "{}\n"},
+		etags: map[string]string{kA: "v1", kB: "v1", kL: "v1", kN: "v1"},
+	}
+	// B was pulled before and has since changed; L is this machine's own.
+	if err := db.RecordRemoteObject(database, "laptop", db.SyncPull, kB, "v0", 1, "x"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO sessions (session_id, project_key) VALUES (?, '-p')`, idL); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := Pull(context.Background(), database, src, PullOptions{Origin: "laptop", DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	states := map[string]string{}
+	for _, c := range st.Changes {
+		states[c.Key] = c.Action + " " + c.Reason
+	}
+	if states[kA] != "fetch new" || states[kB] != "fetch changed" || states[kL] != "skip already local" ||
+		states[kN] != "skip not a session" {
+		t.Errorf("states = %v, want fetch new / fetch changed / skip already local / skip not a session", states)
+	}
+	// Every listed file is accounted for, skipped ones included.
+	if len(st.Changes) != st.Listed {
+		t.Errorf("dry run accounted for %d of %d listed files", len(st.Changes), st.Listed)
+	}
+	if len(src.fetched) != 0 {
+		t.Errorf("a dry run fetched %v", src.fetched)
+	}
+	if _, exists := db.SessionOrigin(database, idA); exists {
+		t.Error("a dry run imported a session")
+	}
+	if etags, _ := db.RemoteETags(database, "laptop", db.SyncPull); etags[kA] != "" || etags[kB] != "v0" {
+		t.Errorf("a dry run recorded etags: %v", etags)
+	}
+
+	// So the real run still does the work.
+	st, err = Pull(context.Background(), database, src, PullOptions{Origin: "laptop"})
+	if err != nil || st.Imported != 2 || st.Claimed["local"] != 1 {
+		t.Errorf("real run after the dry run = %+v, %v", st, err)
+	}
+}
+
+func TestPushDryRunListsWithoutUploading(t *testing.T) {
+	home := fakeHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", "")
+	database := testDB(t)
+	sink := &fakeSink{}
+	opts := PushOptions{Dest: "s3://b/homes/laptop", DryRun: true}
+
+	st, err := Push(context.Background(), database, sink, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.put) != 0 {
+		t.Errorf("a dry run uploaded %v", sink.put)
+	}
+	if len(st.Changes) != 3 {
+		t.Errorf("changes = %+v, want the three local sessions", st.Changes)
+	}
+	for _, c := range st.Changes {
+		if c.Action != "upload" || c.Reason != "new" {
+			t.Errorf("%s: %s %s, want upload new", c.Key, c.Action, c.Reason)
+		}
+	}
+	opts.DryRun = false
+	if st, _ := Push(context.Background(), database, sink, opts); st.Uploaded != 3 {
+		t.Errorf("real push after the dry run uploaded %d, want 3", st.Uploaded)
+	}
+	// A second dry run lists the same files, now as skipped.
+	opts.DryRun = true
+	st, _ = Push(context.Background(), database, sink, opts)
+	for _, c := range st.Changes {
+		if c.Action != "skip" || c.Reason != "unchanged" {
+			t.Errorf("%s: %s %s, want skip unchanged", c.Key, c.Action, c.Reason)
+		}
 	}
 }

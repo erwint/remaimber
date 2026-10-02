@@ -311,8 +311,21 @@ pulled under another name - is left as it is.
 
 Each object's etag is recorded, so a repeat pull transfers only what changed:
 the S3 ETag, or size and modification time over ssh. `--force` ignores them,
-`--dry-run` shows what would move, and `remaimber sync status` lists every
-origin with its last sync.
+and `remaimber sync status` lists every origin with its last sync.
+
+`--dry-run` (pull and push) transfers nothing and lists every file it looked at,
+with what it would do and why:
+
+```
+  fetch  new               39 KB  claude/-Users-build/7d5d7031-....jsonl
+  fetch  changed           46 KB  codex/2026/09/03/rollout-...-01a0645d-....jsonl
+  skip   unchanged        515 KB  codex/2026/09/03/rollout-...-01a0642c-....jsonl
+  skip   already local     12 KB  claude/-Users-me-proj/11111111-....jsonl
+```
+
+A push skips as `forgotten` any session pruned or forgotten here. A session
+already in the archive under another origin is skipped without being
+downloaded, since its file name says whose it is.
 
 A pulled session can be read here (`remaimber resume <id> --match ...`,
 `get_segments`) but resumed only on its own machine, where its transcript lives.
