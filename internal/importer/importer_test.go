@@ -337,3 +337,37 @@ func TestImportAll_WithTestDir(t *testing.T) {
 		t.Errorf("scanned = %d, want 0", stats.FilesScanned)
 	}
 }
+
+// A transcript read while its agent is writing can end in half a line. Sync
+// makes that the normal case — the other machine is in use — and the line must
+// be read again once complete, not skipped by an offset that already moved
+// past it.
+func TestImportFile_PartialLastLineIsReadAgain(t *testing.T) {
+	database := testDB(t)
+	dir := t.TempDir()
+	id := "partial-001"
+	first := `{"type":"user","uuid":"p1","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"one"},"sessionId":"partial-001"}`
+	second := `{"type":"assistant","uuid":"p2","timestamp":"2026-01-01T00:01:00Z","message":{"role":"assistant","content":[{"type":"text","text":"two"}]},"sessionId":"partial-001"}`
+
+	path := filepath.Join(dir, id+".jsonl")
+	// The second line caught mid-write: no closing brace, no newline.
+	if err := os.WriteFile(path, []byte(first+"\n"+second[:40]), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sf := SessionFile{Path: path, SessionID: id, ProjectKey: "-p"}
+	if _, _, _, err := ImportFile(database, sf, false); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(path, []byte(first+"\n"+second+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := ImportFile(database, sf, false); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	database.QueryRow(`SELECT COUNT(*) FROM messages WHERE session_id = ?`, id).Scan(&n)
+	if n != 2 {
+		t.Errorf("%d messages imported, want 2: the line that was half-written the first time was lost", n)
+	}
+}

@@ -143,8 +143,14 @@ func ImportFile(database *sql.DB, sf SessionFile, force bool) (imported bool, ne
 	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024) // 10MB max line
 	bytesRead := offset
 
+	// Where the line being read started, and how many messages preceded it,
+	// so a final line still being written can be handed back below.
+	var lineStart int64
+	var msgsBefore int
+	scanned := false
 	for scanner.Scan() {
 		line := scanner.Bytes()
+		lineStart, msgsBefore, scanned = bytesRead, len(messages), true
 		bytesRead += int64(len(line)) + 1 // +1 for newline
 
 		if sf.AgentOf() == AgentCodex {
@@ -183,6 +189,15 @@ func ImportFile(database *sql.DB, sf SessionFile, force bool) (imported bool, ne
 	}
 	if err := scanner.Err(); err != nil {
 		return false, 0, 0, fmt.Errorf("scan: %w", err)
+	}
+	// A last line with no newline may be one the agent is still writing — on
+	// another machine's transcript mid-sync, that is the usual case. Consuming
+	// it would move the offset past it, and the completed line would never be
+	// read. It is left for next time instead; every agent ends its lines with a
+	// newline, so a finished line is never held back for long.
+	if scanned && bytesRead > size {
+		bytesRead = lineStart
+		messages = messages[:msgsBefore]
 	}
 
 	if len(messages) == 0 && offset > 0 {
@@ -223,6 +238,7 @@ func ImportFile(database *sql.DB, sf SessionFile, force bool) (imported bool, ne
 		FileSize:       size,
 		LastByteOffset: bytesRead,
 		Agent:          sessionMeta.agent,
+		Origin:         sf.Origin,
 	}
 	if err := db.UpsertSession(tx, sess); err != nil {
 		return false, 0, 0, fmt.Errorf("upsert session: %w", err)
