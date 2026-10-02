@@ -74,6 +74,8 @@ All three accept scoping. Add them when the user implies a scope:
 - `--repo .` restricts to the current repo across every worktree; `--subpath .`
   narrows to the current sub-project
 - `--agent claude|codex|pi` restricts to one agent (the CLI searches all of them by default)
+- `--origin <machine>` (search, list) restricts to sessions synced from that
+  machine; `--origin local` to this machine's own
 - `--project <name>` filters by project key
 - `--since <date>` / `--until <date>` for date ranges (ISO 8601, e.g. `2026-08-06T11:18`)
 - `--role user` / `--role assistant` (search only)

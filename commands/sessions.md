@@ -11,10 +11,19 @@ archive spans every imported agent — Claude Code, Codex and pi.
   `remaimber list --repo . --limit 20`
   Add `--subpath .` to narrow to the current monorepo sub-project.
 - Otherwise: `remaimber list --limit 20`.
-- Pass any user-specified filters as flags (`--project`, `--since`, `--until`).
+- Pass any user-specified filters as flags (`--project`, `--agent`, `--origin`, `--since`, `--until`).
 
 Use `--json` to get structured output — each entry includes `summary`, `repo_id`,
 `subpath`, `worktree_root`, `git_branch`, and `message_count`.
+
+## Sessions from other machines
+
+The archive can hold sessions synced from other machines (`remaimber sync pull`).
+They are tagged `@<machine>` next to the project, carry `origin` in `--json`
+output, and `--origin <machine>` filters to them (`--origin local` for this
+machine's own). Their transcripts stay on that machine: read them here like any
+other session, but they never show the `*` resumable mark and can be resumed
+natively only where they ran.
 
 ## Cross-worktree awareness
 
@@ -29,7 +38,7 @@ uses it to gather every session for the current repo regardless of worktree.
 Show a row per session: resumable indicator (`*` = its transcript still exists),
 session id (first 8 chars), repo subpath or project, message count — and the
 **summary** as the description (sessions from an agent other than Claude Code are
-tagged with the agent name next to the project) (fall back to the first prompt only when a session
+tagged with the agent name next to the project, and synced ones with `@<machine>`) (fall back to the first prompt only when a session
 has no summary yet). If results span worktrees, note which is which via `cwd` /
 `worktree_root`.
 

@@ -14,7 +14,7 @@ The archive spans every imported agent — Codex, Claude Code and pi.
   `remaimber list --repo . --limit 20`
   Add `--subpath .` to narrow to the current monorepo sub-project.
 - Otherwise: `remaimber list --limit 20`.
-- Pass any user-specified filters as flags (`--project`, `--since`, `--until`).
+- Pass any user-specified filters as flags (`--project`, `--agent`, `--origin`, `--since`, `--until`).
 
 Use `--json` to get structured output — each entry includes `summary`, `agent`,
 `repo_id`, `subpath`, `worktree_root`, `git_branch`, and `message_count`.
@@ -29,6 +29,15 @@ round: it searches everything, and `--agent <name>` narrows it.
 
 So when a lookup comes back empty, widening the agent scope is the first thing to
 try, not the last: the work may well have happened in another agent.
+
+## Sessions from other machines
+
+The archive can hold sessions synced from other machines (`remaimber sync pull`).
+They are tagged `@<machine>` next to the project, carry `origin` in `--json`
+output, and `--origin <machine>` filters to them (`--origin local` for this
+machine's own). Their transcripts stay on that machine: read them here like any
+other session, but they never show the `*` resumable mark and can be resumed
+natively only where they ran.
 
 ## Cross-worktree awareness
 
