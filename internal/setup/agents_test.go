@@ -77,3 +77,17 @@ func TestCodexStatusAcceptsAPlainMCPRegistration(t *testing.T) {
 		t.Errorf("codex with an MCP registration = %+v, want wired", s)
 	}
 }
+
+// The pi package registers its MCP server only where pi can take one; the
+// report has to tell an older pi apart, or the missing tools go unexplained.
+func TestPiHasMCP(t *testing.T) {
+	for v, want := range map[string]bool{
+		"1.0.0": true, "1.2.3": true, "v2.0.0": true,
+		"0.84.1": false, "0.99.0": false,
+		"": true, "dev": true, // unreadable: not worth a false alarm
+	} {
+		if got := piHasMCP(v); got != want {
+			t.Errorf("piHasMCP(%q) = %v, want %v", v, got, want)
+		}
+	}
+}

@@ -29,7 +29,10 @@ make test     # runs all tests
   (repo root is the plugin root)
 - `plugins/rmb/` + `.agents/plugins/marketplace.json` — Codex plugin; its
   `skills/` are shared with pi
-- `package.json` (`pi` manifest) + `pi/extensions/` — pi package
+- `package.json` (`pi` manifest) + `pi/extensions/` — pi package. On pi 1.0+ the
+  extension also registers the MCP server (`pi.registerMcpServer`, feature-
+  detected so older pi still loads it), with `deferred` exposure so the tools
+  are loaded through `tool_search` instead of declared on every request
 
 Bump `version` in `plugins/rmb/.codex-plugin/plugin.json` when the Codex plugin
 changes: Codex caches an installed plugin by version. Both plugins have a

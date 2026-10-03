@@ -1,12 +1,15 @@
 package setup
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/erwint/remaimber/internal/homedir"
 )
@@ -31,6 +34,8 @@ type AgentStatus struct {
 	Install [][]string
 	Note    string   // printed after a successful install
 	Next    []string // shown when reporting rather than installing
+	// Caveat is a limit of a configured agent, shown under "configured".
+	Caveat string
 }
 
 // Options controls what SetupAgents does.
@@ -131,6 +136,9 @@ func ReportAgents() {
 			fmt.Printf("  %-6s not installed\n", s.Name)
 		case s.Wired:
 			fmt.Printf("  %-6s configured\n", s.Name)
+			if s.Caveat != "" {
+				fmt.Printf("           %s\n", s.Caveat)
+			}
 		default:
 			fmt.Printf("  %-6s installed, not wired up yet:\n", s.Name)
 			for _, c := range s.Next {
@@ -253,7 +261,34 @@ func piStatus(home string) AgentStatus {
 	}
 	s.Install = [][]string{{"pi", "install", "git:github.com/erwint/remaimber"}}
 	s.Next = []string{"remaimber setup --agent pi"}
+	// The package registers the MCP server itself, but only pi 1.0 and later
+	// can take it. Earlier versions archive fine and offer no search tools,
+	// which nothing else would point out.
+	if s.Wired {
+		if v := piVersion(); v != "" && !piHasMCP(v) {
+			s.Caveat = "pi " + v + " predates MCP support: conversations are archived, but the search tools need pi 1.0+"
+		}
+	}
 	return s
+}
+
+// piVersion asks pi for its version, or "" when it cannot say.
+func piVersion() string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "pi", "--version").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// piHasMCP reports whether a pi version has MCP support (1.0 onward). An
+// unreadable version is given the benefit of the doubt.
+func piHasMCP(version string) bool {
+	major, _, _ := strings.Cut(strings.TrimPrefix(version, "v"), ".")
+	n, err := strconv.Atoi(major)
+	return err != nil || n >= 1
 }
 
 func codexHome(home string) string {

@@ -5,9 +5,10 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 
 // remaimber archives pi's conversations alongside Claude Code's and Codex's, so
 // any of them can search the others. It reads pi's session files directly; this
-// extension only supplies the lifecycle pi has and a file on disk does not:
-// when a session starts (capture its durable repo identity while the worktree
-// still exists), and when it is worth importing what has been written so far.
+// extension supplies the lifecycle pi has and a file on disk does not: when a
+// session starts (capture its durable repo identity while the worktree still
+// exists), and when it is worth importing what has been written so far. On pi
+// 1.0 and later it also registers the MCP server, for the search tools.
 //
 // Everything here is fire-and-forget. An archiver that can stall or fail a
 // coding session is worse than one that misses an update — the next session's
@@ -84,6 +85,47 @@ function sessionID(ctx: ExtensionContext): string | undefined {
   return sep >= 0 ? base.slice(sep + 1) : base;
 }
 
+/**
+ * The MCP server gives pi the search tools Claude Code and Codex have
+ * (mcp__remaimber__find_context and the rest). It is registered from here
+ * rather than written into ~/.pi/agent/mcp.json, so it arrives and leaves with
+ * the package; an mcp.json entry named "remaimber" still takes precedence, which
+ * is how to change its settings for good.
+ *
+ * pi before 1.0 has no MCP support and no registerMcpServer. There the package
+ * keeps archiving and offers no tools, rather than failing to load.
+ */
+function registerMcp(pi: ExtensionAPI): void {
+  const api = pi as unknown as {
+    registerMcpServer?: (name: string, config: Record<string, unknown>) => void;
+  };
+  if (typeof api.registerMcpServer !== "function") return;
+  try {
+    api.registerMcpServer("remaimber", {
+      // A stdio command is one executable, so the PATH fix the hooks get from
+      // their shell line comes from sh here. The installer runs only when the
+      // binary is missing, so a first session cannot race its download.
+      command: "sh",
+      args: [
+        "-c",
+        'PATH="$HOME/.local/bin:$HOME/bin:$PATH"; export PATH; ' +
+          'command -v remaimber >/dev/null 2>&1 || bash "$1" >&2; exec remaimber mcp',
+        "sh",
+        installer,
+      ],
+      description:
+        "Search and recall archived Claude Code, Codex and pi conversations: find where something was discussed, list past sessions, load part of one as context",
+      // Loaded through tool_search when wanted, rather than declared on every
+      // request: the server is listed in the system prompt with the description
+      // above, which is what the model needs to know it is there.
+      exposure: "deferred",
+    });
+  } catch {
+    // Another extension holding the name, or a pi that rejects the config: the
+    // archive still works, only the tools are missing.
+  }
+}
+
 /** Import anything new, then summarize what has gone stale. Both self-throttle. */
 function maintain(): void {
   fire(["import-if-stale"]);
@@ -91,6 +133,10 @@ function maintain(): void {
 }
 
 export default function (pi: ExtensionAPI) {
+  // Registered while loading, so it connects with the session like any other
+  // configured server.
+  registerMcp(pi);
+
   pi.on("session_start", async (_event, ctx) => {
     const id = sessionID(ctx);
     const cwd = process.cwd();

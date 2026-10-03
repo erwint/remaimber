@@ -64,7 +64,7 @@ installed, which are wired up, and what finishes the job.
 |---|---|
 | Claude Code | any version with plugin or hook support |
 | Codex | **0.148.0+** - asynchronous command hooks. Older versions log `skipping async hooks, not supported yet` and run only the synchronous ones, so the archive is still written before a compaction but background maintenance never fires |
-| pi | 0.84+ |
+| pi | 0.84+; 1.0+ for the MCP search tools |
 | Go | 1.26+, to build from source |
 | ssh / AWS CLI | only for `remaimber sync`: ssh that logs in without a prompt, or the `aws` CLI for S3 |
 
@@ -209,6 +209,16 @@ remaimber completion zsh > "${fpath[1]}/_remaimber"
 
 `remaimber mcp` speaks MCP over stdio. Hosts namespace the tools by server, so an
 agent calls them as `mcp__remaimber__find_context` and so on.
+
+Each agent gets the server from what it installs: the Claude Code and Codex
+plugins declare it, and on pi 1.0+ the package's extension registers it, so
+there is nothing to add to any MCP configuration by hand. pi exposes it as
+`deferred`: the server is listed in the system prompt, and the model loads its
+tools through `tool_search` when it needs them, rather than carrying eight tool
+declarations on every request. To change that, add a `remaimber` entry to
+`~/.pi/agent/mcp.json`, which takes precedence over the registered one. On pi
+before 1.0 the package still archives, without the tools; `remaimber doctor`
+says so.
 
 | tool | what it is for |
 |------|----------------|
