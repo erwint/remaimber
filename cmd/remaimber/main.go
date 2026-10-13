@@ -508,7 +508,7 @@ func backfillIdentityCmd() *cobra.Command {
 					CWD:          cwd,
 					CapturedAt:   time.Now().UTC().Format(time.RFC3339),
 				}
-				if err := db.UpsertIdentity(database, id); err == nil {
+				if err := db.FillIdentity(database, id); err == nil {
 					filled++
 				}
 			}
@@ -706,6 +706,14 @@ func searchCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			ids := make([]string, len(results))
+			for i, r := range results {
+				ids[i] = r.SessionID
+			}
+			locs := newLocator().locate(database, ids)
+			for i := range results {
+				results[i].Location = locs[results[i].SessionID]
+			}
 
 			if jsonOut {
 				enc := json.NewEncoder(os.Stdout)
@@ -735,8 +743,11 @@ func searchCmd() *cobra.Command {
 				if r.Origin != "" {
 					agent += " @" + r.Origin
 				}
-				fmt.Printf("%s %s%s%s [%s] %s (%s)\n  %s\n\n",
-					resumable, shortID(r.SessionID), agent, seg, r.Timestamp, title, r.Role, r.Snippet)
+				fmt.Printf("%s %s%s%s [%s] %s (%s)\n", resumable, shortID(r.SessionID), agent, seg, r.Timestamp, title, r.Role)
+				if line := locationLine(r.Location); line != "" {
+					fmt.Printf("  %s\n", line)
+				}
+				fmt.Printf("  %s\n\n", r.Snippet)
 			}
 			if len(results) == 0 {
 				fmt.Println("No results found.")
@@ -1284,6 +1295,11 @@ func findAcrossSessions(database *sql.DB, match, cwd string, gi *gitinfo.Identit
 	if shown > 5 {
 		shown = 5
 	}
+	ids := make([]string, shown)
+	for i := 0; i < shown; i++ {
+		ids[i] = passages[i].SessionID
+	}
+	locs := newLocator().locate(database, ids)
 	for i := 0; i < shown; i++ {
 		p := passages[i]
 		sess, _ := db.GetSession(database, p.SessionID)
@@ -1297,6 +1313,9 @@ func findAcrossSessions(database *sql.DB, match, cwd string, gi *gitinfo.Identit
 		}
 		fmt.Printf("%s %s  %s  %-22s  %d hits\n", mark, shortID(p.SessionID),
 			formatSpan([2]string{p.StartedAt, p.EndedAt}), where, p.Hits)
+		if line := locationLine(locs[p.SessionID]); line != "" {
+			fmt.Printf("    %s\n", line)
+		}
 		fmt.Printf("    %s\n", truncate(p.Snippet, 92))
 	}
 
@@ -1488,6 +1507,7 @@ func passageResult(database *sql.DB, sessionID string, all []db.Segment, match s
 
 	out := struct {
 		SessionID     string          `json:"session_id"`
+		Location      *types.Location `json:"location,omitempty"`
 		Terms         []string        `json:"searched_terms"`
 		TotalSegments int             `json:"total_segments"`
 		TotalMessages int             `json:"total_messages"`
@@ -1496,7 +1516,7 @@ func passageResult(database *sql.DB, sessionID string, all []db.Segment, match s
 		Alternatives  []db.Passage    `json:"alternatives,omitempty"`
 		Messages      []types.Message `json:"messages,omitempty"`
 		Note          string          `json:"note,omitempty"`
-	}{SessionID: sessionID, Terms: db.QueryTerms(match), TotalSegments: len(all), Focus: focus}
+	}{SessionID: sessionID, Location: locateOne(database, sessionID), Terms: db.QueryTerms(match), TotalSegments: len(all), Focus: focus}
 	for _, s := range all {
 		out.TotalMessages += s.MsgCount
 	}
@@ -2379,6 +2399,14 @@ func runMCP() error {
 			return mcp.NewToolResultText(fmt.Sprintf("no matches for %q%s",
 				query, scopeNote(agent, agentDefaulted))), nil
 		}
+		ids := make([]string, len(results))
+		for i, r := range results {
+			ids[i] = r.SessionID
+		}
+		locs := newLocator().locate(database, ids)
+		for i := range results {
+			results[i].Location = locs[results[i].SessionID]
+		}
 		data, _ := json.MarshalIndent(results, "", "  ")
 		return mcp.NewToolResultText(string(data)), nil
 	})
@@ -2438,10 +2466,11 @@ func runMCP() error {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 		out := struct {
-			SessionID string       `json:"session_id"`
-			Summary   string       `json:"summary"`
-			Segments  []db.Segment `json:"segments"`
-		}{sessionID, sess.Summary, segs}
+			SessionID string          `json:"session_id"`
+			Location  *types.Location `json:"location,omitempty"`
+			Summary   string          `json:"summary"`
+			Segments  []db.Segment    `json:"segments"`
+		}{sessionID, locateOne(database, sessionID), sess.Summary, segs}
 		data, _ := json.MarshalIndent(out, "", "  ")
 		return mcp.NewToolResultText(string(data)), nil
 	})
@@ -2508,13 +2537,14 @@ func runMCP() error {
 
 		out := struct {
 			SessionID     string          `json:"session_id"`
+			Location      *types.Location `json:"location,omitempty"`
 			TotalSegments int             `json:"total_segments"`
 			TotalMessages int             `json:"total_messages"`
 			Selected      []int           `json:"selected_segments"`
 			Segments      []db.SegmentHit `json:"segments"`
 			Messages      []types.Message `json:"messages,omitempty"`
 			Note          string          `json:"note,omitempty"`
-		}{SessionID: sessionID, TotalSegments: len(all), Selected: sel}
+		}{SessionID: sessionID, Location: locateOne(database, sessionID), TotalSegments: len(all), Selected: sel}
 		for _, s := range all {
 			out.TotalMessages += s.MsgCount
 		}
@@ -2596,9 +2626,10 @@ func runMCP() error {
 
 		type found struct {
 			db.Passage
-			Project     string   `json:"project"`
-			SessionInfo string   `json:"session_summary,omitempty"`
-			SegSummary  []string `json:"segment_summaries,omitempty"`
+			Project     string          `json:"project"`
+			Location    *types.Location `json:"location,omitempty"`
+			SessionInfo string          `json:"session_summary,omitempty"`
+			SegSummary  []string        `json:"segment_summaries,omitempty"`
 		}
 		out := struct {
 			Terms    []string        `json:"searched_terms"`
@@ -2607,8 +2638,13 @@ func runMCP() error {
 			Note     string          `json:"note,omitempty"`
 		}{Terms: db.QueryTerms(topic)}
 
+		ids := make([]string, len(passages))
+		for i, p := range passages {
+			ids[i] = p.SessionID
+		}
+		locs := newLocator().locate(database, ids)
 		for _, p := range passages {
-			f := found{Passage: p}
+			f := found{Passage: p, Location: locs[p.SessionID]}
 			if sess, _ := db.GetSession(database, p.SessionID); sess != nil {
 				f.Project = importer.PrettyProjectName(sess.ProjectKey)
 				f.SessionInfo = truncate(sess.Summary, 220)
@@ -2956,6 +2992,21 @@ func doctorCmd() *cobra.Command {
 				}
 			}
 
+			// A session whose start-of-session capture never ran (hooks not yet
+			// installed or trusted) has no repo identity, so --repo misses it.
+			// Its directory often still exists and can say what it was.
+			if work, err := db.SessionsNeedingIdentity(database); err == nil {
+				fillable := 0
+				for _, cwd := range work {
+					if gitinfo.Resolve(cwd) != nil {
+						fillable++
+					}
+				}
+				if fillable > 0 {
+					warn("%d session(s) have no repo identity, but their directory is a git repo — run: remaimber backfill-identity", fillable)
+				}
+			}
+
 			var lastImport string
 			database.QueryRow(`SELECT COALESCE(MAX(imported_at),'') FROM sessions`).Scan(&lastImport)
 			if lastImport == "" {
@@ -3138,6 +3189,14 @@ func recallCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			ids := make([]string, len(hits))
+			for i, h := range hits {
+				ids[i] = h.SessionID
+			}
+			locs := newLocator().locate(database, ids)
+			for i := range hits {
+				hits[i].Location = locs[hits[i].SessionID]
+			}
 			if jsonOut {
 				enc := json.NewEncoder(os.Stdout)
 				enc.SetIndent("", "  ")
@@ -3149,9 +3208,11 @@ func recallCmd() *cobra.Command {
 				return nil
 			}
 			for _, h := range hits {
-				fmt.Printf("%s seg %d  %s\n    %s\n\n", shortID(h.SessionID), h.Seq,
-					importer.PrettyProjectName(h.ProjectKey),
-					truncate(strings.ReplaceAll(h.Summary, "\n", " "), 150))
+				fmt.Printf("%s seg %d  %s\n", shortID(h.SessionID), h.Seq, importer.PrettyProjectName(h.ProjectKey))
+				if line := locationLine(h.Location); line != "" {
+					fmt.Printf("    %s\n", line)
+				}
+				fmt.Printf("    %s\n\n", truncate(strings.ReplaceAll(h.Summary, "\n", " "), 150))
 			}
 			fmt.Printf("Pull one back:  remaimber resume <session-id> --segments <seq>\n")
 			return nil

@@ -3,6 +3,8 @@ package db
 import (
 	"database/sql"
 	"strings"
+
+	"github.com/erwint/remaimber/internal/types"
 )
 
 // Segment summaries are the distilled account of what happened. Searching raw
@@ -56,6 +58,9 @@ type SummaryHit struct {
 	ProjectKey string  `json:"project_key,omitempty"`
 	StartedAt  string  `json:"started_at,omitempty"`
 	EndedAt    string  `json:"ended_at,omitempty"`
+	// Location is where the session ran and where that stands now. Filled in
+	// by the caller; nil when not asked for.
+	Location *types.Location `json:"location,omitempty"`
 }
 
 // SearchSummaries finds segments whose summary matches, best first. Complements

@@ -91,8 +91,10 @@ type SearchResult struct {
 	SegmentSeq int `json:"segment_seq"`
 	// Agent is the coding agent the conversation came from; how it is resumed
 	// depends on it.
-	Agent  string `json:"agent,omitempty"` // Origin is the machine the session was synced from, empty for this one.
-	Origin string `json:"origin,omitempty"`
+	Agent  string `json:"agent,omitempty"`  // Origin is the machine the session was synced from, empty for this one.
+	Origin string `json:"origin,omitempty"` // Location is where the session ran and where that stands now. Filled in
+	// by the caller; nil when not asked for.
+	Location *Location `json:"location,omitempty"`
 }
 
 // JSONLLine represents a raw parsed JSONL line from a conversation file.
@@ -113,4 +115,21 @@ type JSONLLine struct {
 type MessageContent struct {
 	Role    string          `json:"role"`
 	Content json.RawMessage `json:"content"`
+}
+
+// Location is where a session ran, as recorded: what a lookup needs to say
+// for the work it found to be gone back to.
+type Location struct {
+	Agent  string `json:"agent"`
+	Origin string `json:"origin,omitempty"` // machine it was synced from; empty for this one
+	// CWD is the directory the session ran in: the one captured at session
+	// start, else the one its transcript records, which every agent writes.
+	CWD          string `json:"cwd,omitempty"`
+	WorktreeRoot string `json:"worktree_root,omitempty"`
+	RepoID       string `json:"repo_id,omitempty"`
+	Branch       string `json:"branch,omitempty"` // at capture
+	// Status is where things stand now — whether that worktree still exists,
+	// where the branch went — filled in by the caller, which knows where it is
+	// being asked from.
+	Status string `json:"status,omitempty"`
 }

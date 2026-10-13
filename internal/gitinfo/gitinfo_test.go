@@ -163,3 +163,11 @@ func TestResolveBranchGoneAndFree(t *testing.T) {
 		t.Error("a nil state must render as nothing")
 	}
 }
+
+// A detached checkout is recorded as "HEAD", which is not a branch; treated as
+// one it would be reported deleted.
+func TestResolveBranchIgnoresDetachedHead(t *testing.T) {
+	if st := ResolveBranch(mkRepo(t), "HEAD"); st != nil {
+		t.Errorf("ResolveBranch(HEAD) = %+v, want nil", st)
+	}
+}

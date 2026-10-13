@@ -35,8 +35,12 @@ All three accept scoping. Add them when the user implies a scope:
 
 `search` skips tool output by default — command and file output is machine noise, and it includes remaimber's own archived results, so leaving it in makes a search match earlier searches for the same term. Pass `--include-tool-output` only when the user is specifically looking for something a command printed.
 
+## Where it happened
+
+Every result carries a `location` (one indented line in CLI output): the directory the session ran in, its worktree, the branch at the time, and a `status` saying where that stands **now**, judged from the current directory — `this worktree, same branch`, `another worktree of this repository; branch X checked out in <path>`, `directory no longer exists; branch X merged here`, `another repository than this one`, or `on <machine>` for a synced session. Repeat the status, not the archived branch: a branch name in an old conversation is a fact about then, and the work may since have been merged here or its worktree removed.
+
 ## Presenting results
 
-Give session ID (first 8 chars), timestamp, project, and the matching snippet. A leading `*` means resumable. Results from another agent are tagged with its name next to the project — keep that visible, since it decides how the session is resumed. Search results carry a `segment_seq` — mention it when offering to pull that part back, since it feeds straight into `remaimber resume <id> --segments <seq>`.
+Give session ID (first 8 chars), timestamp, project, where it happened (the location status above), and the matching snippet. A leading `*` means resumable. Results from another agent are tagged with its name next to the project — keep that visible, since it decides how the session is resumed. Search results carry a `segment_seq` — mention it when offering to pull that part back, since it feeds straight into `remaimber resume <id> --segments <seq>`.
 
 If nothing comes back, say so plainly and check `remaimber stats` for summary coverage before concluding the conversation isn't archived — an unsummarized session is invisible to `recall` and to segment lookups, though `search` still finds it.

@@ -118,7 +118,9 @@ type BranchState struct {
 // result means the question could not be answered — dir is not a repo, or git
 // is unavailable — and the caller should say nothing rather than guess.
 func ResolveBranch(dir, branch string) *BranchState {
-	if dir == "" || branch == "" || Resolve(dir) == nil {
+	// Agents record "HEAD" for a detached checkout. It names no branch, and
+	// looked up as one it would read as a branch that was deleted.
+	if dir == "" || branch == "" || branch == "HEAD" || Resolve(dir) == nil {
 		return nil
 	}
 	st := &BranchState{Name: branch}
@@ -182,6 +184,25 @@ func (b *BranchState) Advice() string {
 	default:
 		return fmt.Sprintf("Branch at capture: %s (git checkout %s to match).", b.Name, b.Name)
 	}
+}
+
+// Short says where the branch stands in a few words, for a location line:
+// "checked out here", "checked out in <path>", "merged here", "deleted", or
+// "not checked out". Empty when nothing is known.
+func (b *BranchState) Short() string {
+	switch {
+	case b == nil || b.Name == "":
+		return ""
+	case b.Current:
+		return "checked out here"
+	case b.CheckedOutAt != "":
+		return "checked out in " + b.CheckedOutAt
+	case b.Merged:
+		return "merged here"
+	case !b.Exists:
+		return "deleted"
+	}
+	return "not checked out"
 }
 
 // git runs one git command in dir and returns its trimmed output, or nil if it

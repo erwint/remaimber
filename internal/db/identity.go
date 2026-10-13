@@ -29,6 +29,26 @@ func UpsertIdentity(db *sql.DB, id *types.SessionIdentity) error {
 	return err
 }
 
+// FillIdentity fills in the repo identity of a session after the fact, without
+// touching what a live capture owns: when it was captured, by which process,
+// and whether the session has ended. A backfill that cleared ended_at would
+// make a finished session look live again to resume's liveness guard.
+func FillIdentity(db *sql.DB, id *types.SessionIdentity) error {
+	_, err := db.Exec(`
+		INSERT INTO session_identity (session_id, repo_id, subpath, worktree_root, cwd, captured_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(session_id) DO UPDATE SET
+			repo_id       = COALESCE(NULLIF(session_identity.repo_id,''), excluded.repo_id),
+			subpath       = COALESCE(session_identity.subpath, excluded.subpath),
+			worktree_root = COALESCE(NULLIF(session_identity.worktree_root,''), excluded.worktree_root),
+			cwd           = COALESCE(NULLIF(session_identity.cwd,''), excluded.cwd),
+			captured_at   = COALESCE(session_identity.captured_at, excluded.captured_at)`,
+		id.SessionID, nullStr(id.RepoID), nullStr(id.Subpath), nullStr(id.WorktreeRoot),
+		nullStr(id.CWD), nullStr(id.CapturedAt),
+	)
+	return err
+}
+
 // MarkEnded clears the liveness marker for a session by stamping ended_at.
 // It inserts a row if none exists so a SessionEnd that races ahead still records.
 func MarkEnded(db *sql.DB, sessionID, endedAt string) error {
@@ -64,14 +84,19 @@ func GetIdentity(db *sql.DB, sessionID string) (*types.SessionIdentity, error) {
 	return &id, nil
 }
 
-// SessionsNeedingIdentity returns session_ids that have a known cwd but no
-// identity row yet — the backfill work list.
+// SessionsNeedingIdentity returns this machine's sessions that have a known cwd
+// but no repo identity — the backfill work list. That includes an identity row
+// holding only an end time: SessionEnd writes one when the SessionStart capture
+// never ran, and a list of only missing rows would pass those over for good.
+// Sessions synced from another machine are left out, since their directories
+// are not on this one.
 func SessionsNeedingIdentity(db *sql.DB) (map[string]string, error) {
 	rows, err := db.Query(`
-		SELECT s.session_id, COALESCE(s.cwd,'')
+		SELECT s.session_id, COALESCE(NULLIF(si.cwd,''), s.cwd)
 		FROM sessions s
 		LEFT JOIN session_identity si USING(session_id)
-		WHERE si.session_id IS NULL AND s.cwd IS NOT NULL AND s.cwd != ''`)
+		WHERE COALESCE(si.repo_id,'') = '' AND COALESCE(s.origin,'') = ''
+		  AND COALESCE(NULLIF(si.cwd,''), s.cwd, '') != ''`)
 	if err != nil {
 		return nil, err
 	}

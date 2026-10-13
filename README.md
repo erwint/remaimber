@@ -278,6 +278,25 @@ Captured at the start, it survives the worktree. So:
 - `remaimber list --repo .` - every session for this repo, whatever worktree it ran in
 - `remaimber resume <id>` - link that transcript under the current directory's project key, so `claude --resume <id>` works *here*
 
+Every lookup says where its sessions ran - `recall`, `search` and `resume
+--match` print a location line, and `find_context`, `search_conversations`,
+`get_segments` and `get_summary` return a `location` - with a status for where
+that stands now, judged from the current directory:
+
+```
+39c7ebc9 seg 3  src/remaimber
+    /Volumes/Data/src/remaimber (main) - this worktree, same branch
+a1b2c3d4 seg 1  src/app
+    /src/app-wt (feature/x) - directory no longer exists; branch feature/x merged here
+```
+
+The other statuses are `another worktree of this repository; branch X checked
+out in <path>`, `another repository than this one`, `not a git repository`, and
+`on <machine>` for a session synced from elsewhere. A session whose start-time
+capture never ran (its agent's hooks were not installed or trusted yet) falls
+back to the directory its transcript records; `remaimber doctor` points at
+`backfill-identity` when such sessions can be filled in, so `--repo` finds them.
+
 Resume warns when the chosen session looks like it is still running elsewhere;
 resuming a live transcript corrupts it. Liveness is judged by the transcript's
 modification time rather than a clean `SessionEnd`, so a killed session ages out
