@@ -118,14 +118,25 @@ moved repository.
 ### Where the CLI ends up
 
 On the plugin route, the first session downloads `remaimber` into a directory
-your `PATH` already has - `~/.local/bin`, `~/bin`, or a writable
-`/usr/local/bin` - so it is runnable straight away.
+your shell's `PATH` already has - `~/.local/bin`, `~/bin`, or a writable
+`/usr/local/bin` - so it is runnable straight away in a terminal, not just from
+the agent.
 
-If none of those is on your `PATH`, it installs to `~/.local/bin` and appends one
-marked line to your shell profile (`~/.zshrc` or `~/.bash_profile`), so a new
-shell finds it. The line is added once and never duplicated. To keep your profile
-untouched, set `REMAIMBER_NO_PATH_EDIT=1` - archiving works regardless, since the
-hooks and the MCP server look in `~/.local/bin` directly.
+"Your shell's `PATH`" is the one a new terminal gets, not the agent's: agents
+run with a `PATH` of their own (often with `~/.local/bin` added), which would
+make a binary your terminal cannot find look installed. So the installer asks a
+fresh interactive login shell, started from a bare environment and given ten
+seconds, and remembers a directory once it is confirmed
+(`~/.remaimber/.on-path`). This also runs when the binary is already present, so
+an earlier install that landed off your `PATH` gets fixed rather than ignored.
+
+If none of those directories is on your `PATH`, it installs to `~/.local/bin`
+and appends one marked line to your shell profile (`~/.zshrc`, or
+`~/.bash_profile` on macOS and `~/.bashrc` elsewhere), so a new shell finds it.
+The line is added once and never duplicated. To keep your profile untouched, set
+`REMAIMBER_NO_PATH_EDIT=1` - archiving works regardless, since the hooks and the
+MCP server look in `~/.local/bin` directly. Other shells (fish, ...) get the line
+to add printed instead.
 
 ## Using it from an agent
 
