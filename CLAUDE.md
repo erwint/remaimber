@@ -25,17 +25,29 @@ make test     # runs all tests
 
 ## Agent integrations
 
-- `.claude-plugin/` + `commands/` + `hooks/` + `.mcp.json` — Claude Code plugin
-  (repo root is the plugin root)
-- `plugins/rmb/` + `.agents/plugins/marketplace.json` — Codex plugin; its
-  `skills/` are shared with pi
+- The repo root is one plugin for both Claude Code and Codex: `.claude-plugin/`
+  and `.codex-plugin/` are the two manifests over the same `skills/`, `hooks/`,
+  `.mcp.json` and `scripts/ensure-installed.sh`. The marketplaces are
+  `.claude-plugin/marketplace.json` and `.agents/plugins/marketplace.json`, both
+  pointing at `./`. `skills/` is shared with pi too
 - `package.json` (`pi` manifest) + `pi/extensions/` — pi package. On pi 1.0+ the
   extension also registers the MCP server (`pi.registerMcpServer`, feature-
   detected so older pi still loads it), with `deferred` exposure so the tools
   are loaded through `tool_search` instead of declared on every request
 
-Bump `version` in `plugins/rmb/.codex-plugin/plugin.json` when the Codex plugin
-changes: Codex caches an installed plugin by version. Both plugins have a
+One plugin, not one per agent, because Codex loads Claude Code plugins too: it
+reads `.claude-plugin/plugin.json`, and its external-agent import copies a Claude
+Code setup's enabled plugins and marketplaces across. Separate plugins meant
+Codex could end up running the Claude Code one, with hooks it does not have and
+no skills. So `hooks/hooks.json` uses only what both agents support: the events
+SessionStart, PreCompact, Stop and SessionEnd (no Claude-only `Notification`),
+`async`, `statusMessage`, timeouts in seconds, and `CLAUDE_PLUGIN_ROOT`, which
+Codex sets alongside `PLUGIN_ROOT`. Slash commands are skills for the same reason:
+Claude Code invokes a plugin skill as `/rmb:recall` like a command, and Codex has
+no `commands/`.
+
+Bump `version` in both manifests when the plugin changes: Codex caches an
+installed plugin by version, and Claude Code does too. Both have a
 validator worth running — `claude plugin validate .` and the plugin-creator
 skill's `validate_plugin.py` for Codex.
 
@@ -54,16 +66,13 @@ written into settings.json is silently inert, which is how the search tools went
 missing for months without a symptom other than an agent saying the tool does not
 exist.
 
-There is no Codex equivalent of `commands/`: custom prompts are deprecated and
-live only in `~/.codex/prompts`, so nothing shippable can provide a slash
-command. Skills are the sanctioned replacement — `$rmb:recall` mentions one
-directly, and the model can load it implicitly from its description.
+In Codex, `$rmb:recall` mentions a skill directly, and the model can load one
+implicitly from its description.
 
-The Codex plugin needs Codex ≥ 0.148.0, where asynchronous command hooks landed.
+On Codex the plugin needs ≥ 0.148.0, where asynchronous command hooks landed.
 Below that the async hooks are skipped with `skipping async hooks, not supported
-yet`. Dropping `"async": true` for shell backgrounding (`... &`, as the Claude
-Code hooks do) would remove the floor, at the cost of Codex no longer accounting
-for the work it started.
+yet`. Dropping `"async": true` for shell backgrounding (`... &`) would remove the
+floor, at the cost of the agent no longer accounting for the work it started.
 
 `remaimber update` replaces the binary with the newest release, and the import
 sweep checks once a day (`internal/selfupdate`). The check rides on

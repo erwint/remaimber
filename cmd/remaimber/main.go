@@ -1837,7 +1837,7 @@ func runBatchSummarize(ctx context.Context, cfg summarizer.Config, database *sql
 
 // summarizeIfStaleCmd is the throttled background summary sweep used by hooks.
 // Because SessionEnd is not guaranteed to fire (e.g. a VM killed overnight), this
-// runs opportunistically on reliable, recurring events (SessionStart, Notification)
+// runs opportunistically on reliable, recurring events (SessionStart, Stop)
 // so summaries still get produced. It throttles via a stamp file. Both backends
 // run from hooks now: the claude backend uses --no-session-persistence, which runs
 // fine inside a session and creates no nested session to recurse through.

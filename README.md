@@ -32,6 +32,11 @@ codex plugin add rmb@remaimber
 pi install git:github.com/erwint/remaimber
 ```
 
+It is one plugin for both Claude Code and Codex - the same skills, hooks and MCP
+server - so it also works when Codex picks up the Claude Code install itself,
+through its import of a Claude Code setup. After an update that changes the
+hooks, Codex asks once (`/hooks`) to trust them again.
+
 ### From the CLI
 
 Install `remaimber` yourself and let it install those plugins for you, into
@@ -404,7 +409,7 @@ pull on the other machine.
 
 A long conversation is summarized in **segments**, so it can be recalled - or
 resumed in part - without reading all of it. Summaries come from a throttled
-background sweep wired into recurring hooks (`SessionStart`, `Notification`,
+background sweep wired into recurring hooks (`SessionStart`, `Stop`,
 `SessionEnd` and their equivalents), deliberately not `SessionEnd` alone: that
 event is not guaranteed to fire, and a machine killed overnight would leave its
 sessions unsummarized forever. The sweep throttles itself (15 minutes by

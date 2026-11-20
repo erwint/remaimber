@@ -8,7 +8,7 @@
       "name": "rmb",
       "source": {
         "source": "local",
-        "path": "./plugins/rmb"
+        "path": "./"
       },
       "policy": {
         "installation": "AVAILABLE",

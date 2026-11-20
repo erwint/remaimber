@@ -19,7 +19,7 @@
       "./pi/extensions"
     ],
     "skills": [
-      "./plugins/rmb/skills"
+      "./skills"
     ]
   }
 }
